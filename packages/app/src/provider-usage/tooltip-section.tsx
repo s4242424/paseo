@@ -33,7 +33,10 @@ export function ProviderUsageTooltipSection({
     );
   }
 
-  const providers = selectTooltipProviders(view.payload.providers, activeProviderId);
+  const providers = selectTooltipProviders(
+    view.payload.providers,
+    activeProviderId
+  );
 
   return (
     <>
@@ -41,11 +44,20 @@ export function ProviderUsageTooltipSection({
       <Text style={styles.detail}>Account allowances on this host</Text>
       <ScrollView
         testID="provider-usage-scroll"
-        style={{ maxHeight: Math.max(100, Math.min(360, height * 0.45)), width: Math.min(320, width - 48) }}
+        style={{
+          maxHeight: Math.max(100, Math.min(360, height * 0.45)),
+          width: Math.min(320, width - 48),
+        }}
         contentContainerStyle={styles.providers}
         nestedScrollEnabled
       >
-        {providers.map((usage) => <ProviderUsageCard key={usage.providerId.toLowerCase()} usage={usage} compact />)}
+        {providers.map((usage) => (
+          <ProviderUsageCard
+            key={usage.providerId.toLowerCase()}
+            usage={usage}
+            compact
+          />
+        ))}
       </ScrollView>
     </>
   );

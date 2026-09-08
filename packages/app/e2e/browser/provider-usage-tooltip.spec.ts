@@ -49,12 +49,15 @@ test.describe("provider usage tooltip", () => {
     try {
       expect(usageFixture.requestCount()).toBe(0);
 
-      await page.getByTestId("context-window-meter").hover();
+      await page.getByTestId("context-window-meter").click();
       await usageFixture.waitForRequestCount(1);
 
       await expect(page.getByText("Mock provider", { exact: true })).toBeVisible({
         timeout: 10_000,
       });
+      await expect(page.getByText("Claude", { exact: true })).toBeVisible();
+      await expect(page.getByText("Codex", { exact: true })).toBeVisible();
+      await page.getByText("Test plan").scrollIntoViewIfNeeded();
       await expect(page.getByText("Test plan")).toBeVisible();
       await expect(page.getByText("Session", { exact: true })).toBeVisible();
       await expect(page.getByText("42%")).toBeVisible();
@@ -95,14 +98,14 @@ test.describe("provider usage tooltip", () => {
     try {
       const meter = page.getByTestId("context-window-meter");
 
-      await meter.hover();
+      await meter.click();
       await usageFixture.waitForRequestCount(1);
       await expect(page.getByText("41%")).toBeVisible({ timeout: 10_000 });
 
-      await page.mouse.move(0, 0);
+      await page.keyboard.press("Escape");
       await expect(page.getByText("Mock provider", { exact: true })).toHaveCount(0);
 
-      await meter.hover();
+      await meter.click();
       await usageFixture.waitForRequestCount(2);
       expect(usageFixture.requestCount()).toBe(2);
       await expect(page.getByText("64%")).toBeVisible();

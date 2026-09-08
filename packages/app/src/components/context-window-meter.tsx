@@ -3,7 +3,11 @@ import { Pressable, Text, View } from "react-native";
 import Svg, { Circle } from "react-native-svg";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { useTranslation } from "react-i18next";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { ProviderUsageTooltipSection } from "@/provider-usage/tooltip-section";
 import { useProviderUsage } from "@/provider-usage/use-provider-usage";
 import { formatTokenCount } from "./context-window-meter.utils";
@@ -38,7 +42,10 @@ function isValidUsedTokens(value: number): boolean {
   return Number.isFinite(value) && value >= 0;
 }
 
-function getUsagePercentage(maxTokens: number, usedTokens: number): number | null {
+function getUsagePercentage(
+  maxTokens: number,
+  usedTokens: number
+): number | null {
   if (!isValidMaxTokens(maxTokens) || !isValidUsedTokens(usedTokens)) {
     return null;
   }
@@ -61,7 +68,7 @@ function formatSessionCost(value: number): string | null {
 
 function getMeterColors(
   percentage: number,
-  theme: ReturnType<typeof useUnistyles>["theme"],
+  theme: ReturnType<typeof useUnistyles>["theme"]
 ): { progress: string; track: string } {
   const track = theme.colors.surface3;
   if (percentage > 90) {
@@ -109,12 +116,12 @@ export function ContextWindowMeter({
   const { theme } = useUnistyles();
   const { t } = useTranslation();
   const [isTooltipOpen, setIsTooltipOpen] = useState(false);
-  const { view: providerUsageView, refresh: refreshProviderUsage } = useProviderUsage(
-    serverId ?? null,
-    { enabled: isTooltipOpen },
-  );
+  const { view: providerUsageView, refresh: refreshProviderUsage } =
+    useProviderUsage(serverId ?? null, { enabled: isTooltipOpen });
   const percentage =
-    maxTokens !== null && usedTokens !== null ? getUsagePercentage(maxTokens, usedTokens) : null;
+    maxTokens !== null && usedTokens !== null
+      ? getUsagePercentage(maxTokens, usedTokens)
+      : null;
   const handleTooltipOpenChange = useCallback(
     (nextOpen: boolean) => {
       setIsTooltipOpen(nextOpen);
@@ -122,7 +129,7 @@ export function ContextWindowMeter({
         void refreshProviderUsage().catch(() => {});
       }
     },
-    [refreshProviderUsage],
+    [refreshProviderUsage]
   );
 
   const geometry = getMeterGeometry(showPercentage, glyphSize);
@@ -160,7 +167,14 @@ export function ContextWindowMeter({
 
   const clampedPercentage = clampPercentage(percentage);
   const roundedPercentage = Math.round(percentage);
-  const { svgSize, center, radius, strokeWidth, circumference, containerStyle } = geometry;
+  const {
+    svgSize,
+    center,
+    radius,
+    strokeWidth,
+    circumference,
+    containerStyle,
+  } = geometry;
   const dashOffset = circumference - (clampedPercentage / 100) * circumference;
   const colors = getMeterColors(clampedPercentage, theme);
   const formattedSessionCost =
@@ -173,6 +187,7 @@ export function ContextWindowMeter({
       delayDuration={0}
       enabledOnDesktop
       enabledOnMobile
+      interactive
     >
       <TooltipTrigger asChild triggerRefProp="ref">
         <Pressable
@@ -212,11 +227,19 @@ export function ContextWindowMeter({
             />
           </Svg>
           {showPercentage ? (
-            <Text style={styles.percentageLabel}>{`${roundedPercentage}%`}</Text>
+            <Text
+              style={styles.percentageLabel}
+            >{`${roundedPercentage}%`}</Text>
           ) : null}
         </Pressable>
       </TooltipTrigger>
-      <TooltipContent side="top" align="center" offset={8}>
+      <TooltipContent
+        side="top"
+        align="center"
+        offset={8}
+        maxWidth={344}
+        testID="context-window-popup"
+      >
         <View style={styles.tooltipContent}>
           <Text style={styles.tooltipTitle}>{t("contextWindow.title")}</Text>
           <Text style={styles.tooltipText}>
@@ -233,7 +256,10 @@ export function ContextWindowMeter({
               {t("contextWindow.sessionCost", { cost: formattedSessionCost })}
             </Text>
           ) : null}
-          <ProviderUsageTooltipSection view={providerUsageView} activeProviderId={provider} />
+          <ProviderUsageTooltipSection
+            view={providerUsageView}
+            activeProviderId={provider}
+          />
         </View>
       </TooltipContent>
     </Tooltip>

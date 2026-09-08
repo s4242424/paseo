@@ -1,5 +1,5 @@
 import { defineConfig, configDefaults } from "vitest/config";
-import { playwright } from "@vitest/browser-playwright";
+import { playwright, defineBrowserCommand } from "@vitest/browser-playwright";
 import path from "path";
 import fs from "fs";
 
@@ -22,9 +22,16 @@ export default defineConfig({
         test: {
           name: "unit",
           environment: "node",
-          include: ["src/**/*.{test,spec}.{ts,tsx}", "native-release-version.test.ts"],
+          include: [
+            "src/**/*.{test,spec}.{ts,tsx}",
+            "native-release-version.test.ts",
+          ],
           setupFiles: [path.resolve(__dirname, "vitest.setup.ts")],
-          exclude: [...configDefaults.exclude, "e2e/**", "src/**/*.browser.{test,spec}.{ts,tsx}"],
+          exclude: [
+            ...configDefaults.exclude,
+            "e2e/**",
+            "src/**/*.browser.{test,spec}.{ts,tsx}",
+          ],
         },
       },
       {
@@ -35,13 +42,24 @@ export default defineConfig({
           include: ["src/**/*.browser.{test,spec}.{ts,tsx}"],
           browser: {
             enabled: true,
+            commands: {
+              wheelUsage: defineBrowserCommand(async ({ page, frame }) => {
+                await (await frame())
+                  .getByTestId("provider-usage-scroll")
+                  .hover();
+                await page.mouse.wheel(0, 250);
+              }),
+            },
             provider: playwright(),
             headless: true,
             connectTimeout: 180_000,
             instances: [{ browser: "chromium" }],
             screenshotDirectory: ".vitest-screenshots",
           },
-          globalSetup: path.resolve(__dirname, "src/runtime/websocket-test-global-setup.ts"),
+          globalSetup: path.resolve(
+            __dirname,
+            "src/runtime/websocket-test-global-setup.ts"
+          ),
         },
       },
     ],
@@ -106,14 +124,20 @@ export default defineConfig({
       // Reanimated only imports it on the native path, which no test takes.
       {
         find: /^react-native\/Libraries\/Renderer\/shims\/ReactFabric$/,
-        replacement: path.resolve(__dirname, "test-stubs/react-native-fabric-shim.ts"),
+        replacement: path.resolve(
+          __dirname,
+          "test-stubs/react-native-fabric-shim.ts"
+        ),
       },
       // Point to the ESM build so Vite can transform its imports and apply the
       // react alias below (the CJS build uses require('react') which bypasses
       // Vite alias resolution).
       {
         find: "react-native",
-        replacement: path.resolve(rootNodeModules, "react-native-web/dist/index.js"),
+        replacement: path.resolve(
+          rootNodeModules,
+          "react-native-web/dist/index.js"
+        ),
       },
       { find: "react", replacement: resolvePackageEntry("react") },
       {
@@ -122,15 +146,24 @@ export default defineConfig({
       },
       {
         find: /^@xterm\/addon-ligatures\/lib\/addon-ligatures\.mjs$/,
-        replacement: path.resolve(__dirname, "test-stubs/xterm-addon-ligatures.ts"),
+        replacement: path.resolve(
+          __dirname,
+          "test-stubs/xterm-addon-ligatures.ts"
+        ),
       },
       {
         find: /^@xterm\/addon-ligatures$/,
-        replacement: path.resolve(__dirname, "test-stubs/xterm-addon-ligatures.ts"),
+        replacement: path.resolve(
+          __dirname,
+          "test-stubs/xterm-addon-ligatures.ts"
+        ),
       },
       {
         find: /^react-native-unistyles$/,
-        replacement: path.resolve(__dirname, "test-stubs/react-native-unistyles.ts"),
+        replacement: path.resolve(
+          __dirname,
+          "test-stubs/react-native-unistyles.ts"
+        ),
       },
       {
         find: /^react-native-svg$/,
@@ -140,15 +173,24 @@ export default defineConfig({
       // mounts a menu surface.
       {
         find: /^react-native-safe-area-context$/,
-        replacement: path.resolve(__dirname, "test-stubs/react-native-safe-area-context.ts"),
+        replacement: path.resolve(
+          __dirname,
+          "test-stubs/react-native-safe-area-context.ts"
+        ),
       },
       {
         find: /^@gorhom\/bottom-sheet$/,
-        replacement: path.resolve(__dirname, "test-stubs/gorhom-bottom-sheet.ts"),
+        replacement: path.resolve(
+          __dirname,
+          "test-stubs/gorhom-bottom-sheet.ts"
+        ),
       },
       {
         find: /^react-native-reanimated\/scripts\/validate-worklets-version$/,
-        replacement: path.resolve(__dirname, "test-stubs/reanimated-validate-worklets-version.ts"),
+        replacement: path.resolve(
+          __dirname,
+          "test-stubs/reanimated-validate-worklets-version.ts"
+        ),
       },
       {
         find: /^expo-linking$/,
@@ -156,7 +198,10 @@ export default defineConfig({
       },
       {
         find: /^lucide-react-native$/,
-        replacement: path.resolve(__dirname, "test-stubs/lucide-react-native.ts"),
+        replacement: path.resolve(
+          __dirname,
+          "test-stubs/lucide-react-native.ts"
+        ),
       },
     ],
   },
