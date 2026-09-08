@@ -1,0 +1,113 @@
+{
+  "sourceCommit": "fcefd343393f4babd787b57bef40820626d3bd0a",
+  "decision": "carry-forward",
+  "grounding": {
+    "serena": "get_symbols_overview succeeded; language server reporting degraded",
+    "gopls": "not applicable: TypeScript; no Go changes",
+    "codebase_memory": "unavailable",
+    "Context7": "unavailable"
+  },
+  "checks": {
+    "typecheck": {
+      "exit": 0
+    },
+    "webExport": {
+      "exit": 0
+    },
+    "browser": {
+      "exit": 0,
+      "files": 2,
+      "tests": 5,
+      "scope": "real wheel/container, pointer scrolling, 390px viewport, 33% context preservation, Escape; section both-provider and unavailable cases",
+      "limitations": "animation stubbed with real RN View; provider payload fixture; native touch unproved"
+    },
+    "unitFullNode24BeforeInteractiveRepair": {
+      "exit": 0,
+      "files": 584,
+      "tests": 4880
+    },
+    "unitFullFinal": {
+      "exit": 1,
+      "passedFiles": 583,
+      "passedTests": 4873,
+      "skippedTests": 7,
+      "failure": "unrelated input-draft.live beforeAll 10s timeout during concurrent build"
+    },
+    "isolatedRecheck": {
+      "exit": 0,
+      "files": 3,
+      "tests": 17,
+      "scope": "failed composer suite + affected tooltip + provider selection"
+    },
+    "semgrep": {
+      "exit": 0,
+      "command": "semgrep scan --config p/typescript --metrics off --exclude node_modules --exclude .tmp --exclude .git --exclude dist --json --output .tmp/usage-proof/semgrep.json packages/app/src/provider-usage packages/app/src/components/context-window-meter.tsx packages/app/src/components/context-window-meter.browser.test.tsx packages/app/src/components/ui/tooltip.tsx packages/app/vitest.config.ts packages/app/e2e/browser/provider-usage-tooltip.spec.ts",
+      "targets": 19,
+      "findings": 0,
+      "supportsTrust": true,
+      "exclusions": [
+        "node_modules",
+        ".tmp",
+        ".git",
+        "dist",
+        "untracked files"
+      ]
+    },
+    "trivy": {
+      "exit": 0,
+      "command": "trivy fs --scanners vuln --skip-dirs node_modules --skip-dirs .tmp --skip-dirs .git --skip-dirs packages/app/dist --format json --output .tmp/usage-proof/trivy.json .",
+      "targets": [
+        {
+          "target": "package-lock.json",
+          "packages": 1535,
+          "vulnerabilities": 147
+        },
+        {
+          "target": "packages/expo-two-way-audio/examples/basic-usage/package-lock.json",
+          "packages": 795,
+          "vulnerabilities": 110
+        },
+        {
+          "target": "packages/expo-two-way-audio/examples/flow-api/package-lock.json",
+          "packages": 805,
+          "vulnerabilities": 116
+        },
+        {
+          "target": "packages/expo-two-way-audio/package-lock.json",
+          "packages": 793,
+          "vulnerabilities": 107
+        }
+      ],
+      "supportsTrust": "coverage valid but vulnerability-clean claim blocked: 480 findings in unchanged lockfiles; development dependencies omitted",
+      "exclusions": [
+        "node_modules",
+        ".tmp",
+        ".git",
+        "packages/app/dist",
+        "dev dependencies"
+      ]
+    },
+    "gitleaks": {
+      "exit": 0,
+      "command": "gitleaks git --log-opts=9400a49af670fdb5db4af58e73f8df98588dbea9..HEAD --redact --report-format json --report-path .tmp/usage-proof/gitleaks.json",
+      "commits": 2,
+      "bytes": 25718,
+      "findings": 0,
+      "scope": "objective commits; not full inherited history",
+      "supportsTrust": true
+    }
+  },
+  "native": {
+    "airInstalledVersion": "0.7.2",
+    "vendorSigningTeam": "99ZMJMKU9Y",
+    "sealedAppDistFiles": 39,
+    "changed": false,
+    "reason": "Replacement requires local app packaging/signing and activation; vendor signature would be invalidated by direct patch. No installed-wheel proof."
+  },
+  "unproved": [
+    "signed native deployment",
+    "native touch",
+    "fresh dependency installation reproduction",
+    "full daemon-backed tooltip E2E (spec updated only)"
+  ]
+}
