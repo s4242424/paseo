@@ -1,21 +1,12 @@
-import { Text, View } from "react-native";
+import { ScrollView, Text, View, useWindowDimensions } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
 import { ProviderUsageCard } from "./card";
 import { providerUsageCopy } from "./copy";
-import type { ProviderUsage, ProviderUsageView } from "./types";
+import type { ProviderUsageView } from "./types";
 
-function matchProvider(
-  providers: ProviderUsage[],
-  activeProviderId: string | null | undefined,
-): ProviderUsage | null {
-  if (!activeProviderId) return null;
-  const target = activeProviderId.toLowerCase();
-  return providers.find((usage) => usage.providerId.toLowerCase() === target) ?? null;
-}
+import { selectTooltipProviders } from "./tooltip-providers";
 
-// Renders the active agent's provider usage inside the context-meter tooltip.
-// Returns nothing when the active provider has no usage entry, so the meter's
-// own context section stays the whole tooltip.
+// The ring describes this conversation; these cards describe host account allowances.
 export function ProviderUsageTooltipSection({
   view,
   activeProviderId,
@@ -23,6 +14,7 @@ export function ProviderUsageTooltipSection({
   view: ProviderUsageView;
   activeProviderId: string | null | undefined;
 }) {
+  const { height, width } = useWindowDimensions();
   if (view.kind === "loading") {
     return (
       <>
@@ -41,18 +33,29 @@ export function ProviderUsageTooltipSection({
     );
   }
 
-  const usage = matchProvider(view.payload.providers, activeProviderId);
-  if (!usage) return null;
+  const providers = selectTooltipProviders(view.payload.providers, activeProviderId);
 
   return (
     <>
       <View style={styles.divider} />
-      <ProviderUsageCard usage={usage} compact />
+      <Text style={styles.detail}>Account allowances on this host</Text>
+      <ScrollView
+        testID="provider-usage-scroll"
+        style={{ maxHeight: Math.max(100, Math.min(360, height * 0.45)), width: Math.min(320, width - 48) }}
+        contentContainerStyle={styles.providers}
+        nestedScrollEnabled
+      >
+        {providers.map((usage) => <ProviderUsageCard key={usage.providerId.toLowerCase()} usage={usage} compact />)}
+      </ScrollView>
     </>
   );
 }
 
 const styles = StyleSheet.create((theme) => ({
+  providers: {
+    gap: theme.spacing[4],
+    paddingVertical: theme.spacing[1],
+  },
   divider: {
     height: 1,
     // Same token the popover draws its own outline with, so the rule reads as the
