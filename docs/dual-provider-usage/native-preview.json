@@ -1,0 +1,15 @@
+{
+  "localAssets": {
+    "files": 39,
+    "treeSha256": "a47d0a49088a5053a3ff5254818a1bb490dcec7ffd86ac1f1606c571225b2437"
+  },
+  "airAssets": {
+    "files": 39,
+    "treeSha256": "a47d0a49088a5053a3ff5254818a1bb490dcec7ffd86ac1f1606c571225b2437"
+  },
+  "sourceCommit": "52b79b2c82710481c7ec975c4537bf7c4185a16e",
+  "stagedApp": "Air:/Users/robwork/Applications/Paseo Local Preview.app",
+  "signature": "ad-hoc local build; vendor original preserved",
+  "launched": false,
+  "nativeRuntimeProved": false
+}
