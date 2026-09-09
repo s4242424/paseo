@@ -11,3 +11,5 @@ Commands: `npm run typecheck --workspace=@getpaseo/app`; `npm run test --workspa
 Pending: exact native build and runtime smoke with the real extension; complete acceptance registry; resolution or explicit assessment of baseline dependency findings; final packet and end-of-run Git verification. No Go files changed; Go checks do not apply. Grounding limitations remain as recorded in RUN.md. This checkpoint does not establish broader Escape completion.
 
 Scanner coverage is recorded in SCANNERS.json; independent review in CHALLENGE.md. Native visual smoke is queued in .arch/popup-queue.jsonl under the no-popup discipline.
+
+Packaged dependency assessment: SHIPPED-DEPENDENCIES.json matches the actual candidate archive's 283 package manifests against root-lockfile findings. There are 44 exact name/version matches: 13 high, 28 medium and 3 low. Example-only findings are excluded from this intersection. Manifest absence does not rule out bundled code, and presence does not prove an exploitable call path. These baseline findings remain unresolved; they are not waived or described as development-only.
