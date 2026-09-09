@@ -1744,8 +1744,13 @@ export async function createPaseoDaemon(
     // Freeze both ingress and registration before taking the agent closure snapshot.
     wsServer?.prepareForShutdown();
     agentManager.prepareForShutdown();
-    await closeAllAgents(logger, agentManager);
-    await agentManager.flushForShutdown().catch(() => undefined);
+    const agentShutdownErrors: unknown[] = [];
+    await closeAllAgents(logger, agentManager).catch((error) => {
+      agentShutdownErrors.push(error);
+    });
+    await agentManager.flushForShutdown().catch((error) => {
+      agentShutdownErrors.push(error);
+    });
     detachAgentStoragePersistence();
     await agentStorage.flush().catch(() => undefined);
     await agentProviderRuntime.shutdown();
@@ -1772,6 +1777,12 @@ export async function createPaseoDaemon(
     if (listenTarget.type === "socket" && existsSync(listenTarget.path)) {
       unlinkSync(listenTarget.path);
     }
+    if (agentShutdownErrors.length) {
+      throw new AggregateError(
+        agentShutdownErrors,
+        "Daemon shutdown incomplete: native writer release is unconfirmed",
+      );
+    }
   };
 
   return {
@@ -1790,13 +1801,22 @@ export async function createPaseoDaemon(
 
 async function closeAllAgents(logger: Logger, agentManager: AgentManager): Promise<void> {
   const agents = agentManager.listAgents();
-  await Promise.all(
+  const results = await Promise.allSettled(
     agents.map(async (agent) => {
       try {
         await agentManager.closeAgent(agent.id);
       } catch (err) {
         logger.error({ err, agentId: agent.id }, "Failed to close agent");
+        throw err;
       }
     }),
   );
+  const failures = results.filter(
+    (result): result is PromiseRejectedResult => result.status === "rejected",
+  );
+  if (failures.length)
+    throw new AggregateError(
+      failures.map((result) => result.reason),
+      "Managed agent release is unconfirmed",
+    );
 }

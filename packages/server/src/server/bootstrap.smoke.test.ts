@@ -79,6 +79,20 @@ describe("paseo daemon bootstrap", () => {
     }
   });
 
+  test("stop reports unconfirmed provider release after closing the listener", async () => {
+    const handle = await createTestPaseoDaemon();
+    const release = vi
+      .spyOn(handle.daemon.agentManager, "flushForShutdown")
+      .mockRejectedValue(new Error("native writer still alive"));
+    try {
+      await expect(handle.daemon.stop()).rejects.toThrow("Daemon shutdown incomplete");
+      await expect(fetch(`http://127.0.0.1:${handle.port}/api/health`)).rejects.toThrow();
+    } finally {
+      release.mockRestore();
+      await handle.close();
+    }
+  });
+
   test("keeps timeline activity in memory and removes obsolete timeline files at startup", async () => {
     const paseoHomeRoot = await mkdtemp(path.join(os.tmpdir(), "paseo-timeline-cleanup-"));
     const paseoHome = path.join(paseoHomeRoot, ".paseo");

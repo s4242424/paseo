@@ -1,0 +1,72 @@
+{
+  "semgrep": {
+    "scanned": 312,
+    "errors": {
+      "Timeout": 48
+    },
+    "findings": []
+  },
+  "semgrep-touched": {
+    "scanned": 3,
+    "errors": {},
+    "findings": []
+  },
+  "semgrep-bootstrap": {
+    "scanned": 1,
+    "errors": {},
+    "findings": [
+      {
+        "rule": "javascript.express.security.cors-misconfiguration.cors-misconfiguration",
+        "path": "packages/server/src/server/bootstrap.ts",
+        "line": 736
+      }
+    ]
+  },
+  "trivy": [
+    {
+      "target": "package-lock.json",
+      "vulnerabilities": {
+        "LOW": 10,
+        "MEDIUM": 73,
+        "HIGH": 78,
+        "CRITICAL": 2
+      },
+      "misconfigurations": 0
+    },
+    {
+      "target": "packages/expo-two-way-audio/examples/basic-usage/package-lock.json",
+      "vulnerabilities": {
+        "LOW": 8,
+        "MEDIUM": 35,
+        "HIGH": 84,
+        "CRITICAL": 3
+      },
+      "misconfigurations": 0
+    },
+    {
+      "target": "packages/expo-two-way-audio/examples/flow-api/package-lock.json",
+      "vulnerabilities": {
+        "LOW": 8,
+        "MEDIUM": 35,
+        "HIGH": 90,
+        "CRITICAL": 3
+      },
+      "misconfigurations": 0
+    },
+    {
+      "target": "packages/expo-two-way-audio/package-lock.json",
+      "vulnerabilities": {
+        "LOW": 8,
+        "MEDIUM": 33,
+        "HIGH": 83,
+        "CRITICAL": 3
+      },
+      "misconfigurations": 0
+    },
+    {
+      "target": "docker/base/Dockerfile",
+      "vulnerabilities": {},
+      "misconfigurations": 1
+    }
+  ]
+}
