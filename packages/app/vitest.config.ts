@@ -35,7 +35,9 @@ export default defineConfig({
           include: ["src/**/*.browser.{test,spec}.{ts,tsx}"],
           browser: {
             enabled: true,
-            provider: playwright({launchOptions:{executablePath:process.env.PASEO_TEST_BROWSER_EXECUTABLE}}),
+            provider: playwright({
+              launchOptions: { executablePath: process.env.PASEO_TEST_BROWSER_EXECUTABLE },
+            }),
             headless: true,
             connectTimeout: 180_000,
             commands: {
@@ -75,8 +77,9 @@ export default defineConfig({
   // so it scans the native files and dies on imports react-native-web has no answer for.
   // Unbundled, the same imports go through the resolver below and land on the web files.
   optimizeDeps: {
+    esbuildOptions: { loader: { ".js": "jsx" } },
     include: ["react/jsx-runtime"],
-    exclude: ["react-native-reanimated"],
+    exclude: ["react-native-reanimated", "expo-router", "expo-modules-core"],
   },
   // The globals a React Native bundler defines, which esbuild is no longer there to supply for
   // the package excluded above.

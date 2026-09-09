@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Pressable, ScrollView, Text, useWindowDimensions } from "react-native";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Pressable, ScrollView, Text, useWindowDimensions, type View } from "react-native";
 import Svg, { Circle } from "react-native-svg";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { useTranslation } from "react-i18next";
@@ -135,6 +135,8 @@ export function ContextWindowMeter({
   const { theme } = useUnistyles();
   const { t } = useTranslation();
   const [isTooltipOpen, setIsTooltipOpen] = useState(false);
+  const meterRef = useRef<View>(null);
+  const returningFocus = useRef(false);
   const [dialog, setDialog] = useState<AccountDialogScope | null>(null);
   const viewport = useWindowDimensions();
   const popoverWidth = Math.min(360, Math.max(200, viewport.width - 32));
@@ -144,7 +146,16 @@ export function ContextWindowMeter({
     [popoverWidth, popoverHeight],
   );
   const accessibilityState = useMemo(() => ({ expanded: isTooltipOpen }), [isTooltipOpen]);
-  const closeDialog = useCallback(() => setDialog(null), []);
+  const closeDialog = useCallback(() => {
+    setDialog(null);
+    requestAnimationFrame(() => {
+      returningFocus.current = true;
+      meterRef.current?.focus();
+      requestAnimationFrame(() => {
+        returningFocus.current = false;
+      });
+    });
+  }, []);
   useEffect(() => {
     setIsTooltipOpen(false);
     setDialog(null);
@@ -165,6 +176,7 @@ export function ContextWindowMeter({
     maxTokens !== null && usedTokens !== null ? getUsagePercentage(maxTokens, usedTokens) : null;
   const handleTooltipOpenChange = useCallback(
     (nextOpen: boolean) => {
+      if (nextOpen && returningFocus.current) return;
       setIsTooltipOpen(nextOpen);
       if (nextOpen) {
         void refreshProviderUsage().catch(() => {});
@@ -198,6 +210,7 @@ export function ContextWindowMeter({
       >
         <TooltipTrigger asChild triggerRefProp="ref">
           <Pressable
+            ref={meterRef}
             style={containerStyle}
             testID="context-window-meter"
             accessibilityRole="button"

@@ -579,7 +579,45 @@ export function TooltipContent({
     const pointer = (event: PointerEvent) => {
       if (!inside(event.target)) handleDismiss();
     };
+    const focusable = (root: ParentNode) =>
+      Array.from(
+        root.querySelectorAll<HTMLElement>(
+          'button,a[href],input,textarea,select,[tabindex]:not([tabindex="-1"])',
+        ),
+      ).filter(
+        (element) =>
+          !element.hasAttribute("disabled") &&
+          element.getAttribute("aria-disabled") !== "true" &&
+          element.getClientRects().length > 0,
+      );
     const key = (event: KeyboardEvent) => {
+      const content = ctx.contentRef.current as unknown as HTMLElement | null;
+      if (event.key === "Tab" && content && trigger) {
+        const items = focusable(content);
+        const active = document.activeElement;
+        if (!event.shiftKey && active === trigger && items.length > 0) {
+          event.preventDefault();
+          ctx.cancelClose();
+          items[0].focus();
+          return;
+        }
+        if (event.shiftKey && active === items[0]) {
+          event.preventDefault();
+          handleDismiss();
+          ctx.suppressFocus.current = true;
+          trigger.focus();
+          return;
+        }
+        if (!event.shiftKey && active === items.at(-1)) {
+          event.preventDefault();
+          handleDismiss();
+          const outside = focusable(document).filter((element) => !content.contains(element));
+          const next = outside[outside.indexOf(trigger) + 1] ?? trigger;
+          if (next === trigger) ctx.suppressFocus.current = true;
+          next.focus();
+          return;
+        }
+      }
       if (event.key === "Escape") {
         event.preventDefault();
         handleDismiss();

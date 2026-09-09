@@ -11,6 +11,9 @@ declare module "vitest/browser" {
   }
 }
 const fixture = vi.hoisted(() => ({ unavailable: false, dialogue: false, mutations: 0 }));
+function fixtureSignIn() {
+  fixture.mutations++;
+}
 vi.mock("@/provider-usage/use-provider-accounts", () => ({
   useProviderAccount: () => ({
     available: !fixture.unavailable,
@@ -30,11 +33,7 @@ vi.mock("@/plugins/workspace-panels/content", () => ({
   EmbeddedPluginPanel: ({ target }: { target: { panelId: string } }) => (
     <div data-testid="fixture-account-panel">
       {target.panelId}
-      <button
-        onClick={() => {
-          fixture.mutations++;
-        }}
-      >
+      <button type="button" onClick={fixtureSignIn}>
         Fixture sign-in
       </button>
     </div>
@@ -71,11 +70,17 @@ vi.mock("@/constants/platform", () => ({
   getIsElectron: () => false,
   getIsElectronMac: () => false,
 }));
+vi.mock("expo-router", () => ({
+  router: {},
+  usePathname: () => "/",
+  useLocalSearchParams: () => ({}),
+}));
 vi.mock("react-i18next", () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 vi.mock("react-native-reanimated", async () => {
   const { View } = await import("react-native");
   return {
     default: { View },
+    useAnimatedStyle: (fn: () => unknown) => fn(),
     FadeIn: { duration: () => undefined },
     FadeOut: { duration: () => undefined },
   };
@@ -100,15 +105,23 @@ afterEach(() => {
 function mount(provider = "claude", unknown = false) {
   act(() =>
     root.render(
-      <ContextWindowMeter
-        maxTokens={unknown ? null : 1000}
-        usedTokens={unknown ? null : 330}
-        serverId="host"
-        workspaceId="workspace"
-        agentId="agent"
-        provider={provider}
-        showPercentage
-      />,
+      <>
+        <button type="button" data-testid="before-meter">
+          Before
+        </button>
+        <ContextWindowMeter
+          maxTokens={unknown ? null : 1000}
+          usedTokens={unknown ? null : 330}
+          serverId="host"
+          workspaceId="workspace"
+          agentId="agent"
+          provider={provider}
+          showPercentage
+        />
+        <button type="button" data-testid="after-meter">
+          After
+        </button>
+      </>,
     ),
   );
 }
@@ -151,7 +164,7 @@ it("click pins, a second click closes, and keyboard focus opens unknown context 
   expect(container.textContent).not.toContain("0%");
   await page.getByTestId("context-window-meter").click();
   await expect.element(page.getByTestId("usage-account-popover")).not.toBeInTheDocument();
-  (document.activeElement as HTMLElement)?.blur();
+  await page.getByTestId("before-meter").click();
   await userEvent.keyboard("{Tab}");
   await expect.element(page.getByTestId("usage-account-popover")).toBeVisible();
   await userEvent.keyboard("{Escape}");
@@ -176,4 +189,25 @@ it("login dialogue survives popover dismissal and opening it makes no mutation",
   await expect.element(page.getByTestId("fixture-account-panel")).toBeVisible();
   expect(document.body.textContent).toContain("codex-account");
   expect(fixture.mutations).toBe(0);
+});
+
+it("keyboard traverses both login actions between surrounding toolbar controls", async () => {
+  await page.viewport(800, 700);
+  mount();
+  await page.getByTestId("before-meter").click();
+  await userEvent.keyboard("{Tab}");
+  await expect.element(page.getByTestId("usage-account-popover")).toBeVisible();
+  for (const label of ["Change Claude login", "Change Codex login"]) {
+    for (let i = 0; i < 6 && document.activeElement?.getAttribute("aria-label") !== label; i++)
+      await userEvent.keyboard("{Tab}");
+    expect(document.activeElement?.getAttribute("aria-label")).toBe(label);
+  }
+  await userEvent.keyboard("{Enter}");
+  await expect.element(page.getByTestId("fixture-account-panel")).toBeVisible();
+  await userEvent.keyboard("{Escape}");
+  await expect.element(page.getByTestId("fixture-account-panel")).not.toBeInTheDocument();
+  await expect
+    .poll(() => document.activeElement?.getAttribute("data-testid"))
+    .toBe("context-window-meter");
+  await expect.element(page.getByTestId("usage-account-popover")).not.toBeInTheDocument();
 });
