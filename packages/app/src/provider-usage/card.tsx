@@ -40,9 +40,11 @@ function footerText(usage: ProviderUsage): string | null {
 export function ProviderUsageCard({
   usage,
   compact = false,
+  detailed = false,
 }: {
   usage: ProviderUsage;
   compact?: boolean;
+  detailed?: boolean;
 }) {
   const status = statusText(usage);
   const footer = footerText(usage);
@@ -88,7 +90,7 @@ export function ProviderUsageCard({
       {usage.windows.length > 0 || balances.length > 0 ? (
         <View style={styles.bars}>
           {usage.windows.map((window) => (
-            <ProviderUsageWindowBar key={window.id} window={window} />
+            <ProviderUsageWindowBar key={window.id} window={window} detailed={detailed} />
           ))}
           {balances.map((balance) => (
             <ProviderUsageBalanceBar key={balance.id} balance={balance} />

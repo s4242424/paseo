@@ -47,6 +47,12 @@ interface TooltipContextValue {
   triggerRef: React.RefObject<View | null>;
   enabled: boolean;
   openOnPress: boolean;
+  interactive: boolean;
+  contentRef: React.RefObject<View | null>;
+  pinned: React.RefObject<boolean>;
+  suppressFocus: React.RefObject<boolean>;
+  cancelClose(): void;
+  scheduleClose(): void;
   delayDuration: number;
 }
 
@@ -231,6 +237,7 @@ export function Tooltip({
   delayDuration = 0,
   enabledOnDesktop = true,
   enabledOnMobile = false,
+  interactive = false,
   children,
 }: PropsWithChildren<{
   open?: boolean;
@@ -239,14 +246,45 @@ export function Tooltip({
   delayDuration?: number;
   enabledOnDesktop?: boolean;
   enabledOnMobile?: boolean;
+  interactive?: boolean;
 }>): ReactElement {
   const triggerRef = useRef<View>(null);
+  const contentRef = useRef<View>(null);
+  const pinned = useRef(false);
+  const suppressFocus = useRef(false);
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [isOpen, setIsOpen] = useControllableOpenState({
     open,
     defaultOpen,
     onOpenChange,
   });
 
+  const cancelClose = useCallback(() => {
+    if (closeTimer.current !== null) clearTimeout(closeTimer.current);
+    closeTimer.current = null;
+  }, []);
+  const scheduleClose = useCallback(() => {
+    cancelClose();
+    if (pinned.current) return;
+    closeTimer.current = setTimeout(() => {
+      closeTimer.current = null;
+      // Keep keyboard focus within the trigger or portalled content usable.
+      if (isWeb) {
+        const trigger = triggerRef.current as unknown as HTMLElement | null;
+        const content = contentRef.current as unknown as HTMLElement | null;
+        if (content?.contains(document.activeElement) || trigger?.contains(document.activeElement))
+          return;
+      }
+      setIsOpen(false);
+    }, 180);
+  }, [cancelClose, setIsOpen]);
+  useEffect(() => cancelClose, [cancelClose]);
+  useEffect(() => {
+    if (!isOpen) {
+      pinned.current = false;
+      cancelClose();
+    }
+  }, [isOpen, cancelClose]);
   const isCompact = useIsCompactFormFactor();
   const enabled = isCompact ? enabledOnMobile : enabledOnDesktop;
 
@@ -257,9 +295,15 @@ export function Tooltip({
       triggerRef,
       enabled,
       openOnPress: isCompact,
+      interactive,
+      contentRef,
+      pinned,
+      suppressFocus,
+      cancelClose,
+      scheduleClose,
       delayDuration,
     }),
-    [isOpen, setIsOpen, enabled, isCompact, delayDuration],
+    [isOpen, setIsOpen, enabled, isCompact, delayDuration, interactive, cancelClose, scheduleClose],
   );
 
   return <TooltipContext.Provider value={value}>{children}</TooltipContext.Provider>;
@@ -317,24 +361,31 @@ export function TooltipTrigger({
   const handleHoverIn = useCallback(
     (e?: unknown) => {
       if (isCallable(onHoverIn)) onHoverIn(e);
+      ctx.cancelClose();
       scheduleOpen();
     },
-    [onHoverIn, scheduleOpen],
+    [onHoverIn, scheduleOpen, ctx],
   );
 
   const handleHoverOut = useCallback(
     (e?: unknown) => {
       if (isCallable(onHoverOut)) onHoverOut(e);
-      close();
+      if (ctx.interactive) ctx.scheduleClose();
+      else close();
     },
-    [onHoverOut, close],
+    [onHoverOut, close, ctx],
   );
 
   const handleFocus = useCallback(
     (e: unknown) => {
       if (isCallable(onFocus)) onFocus(e);
       if (!ctx.enabled || disabled) return;
+      if (ctx.suppressFocus.current) {
+        ctx.suppressFocus.current = false;
+        return;
+      }
       if (!shouldOpenOnFocus()) return;
+      ctx.cancelClose();
       clearOpenTimer();
       ctx.setOpen(true);
     },
@@ -344,15 +395,24 @@ export function TooltipTrigger({
   const handleBlur = useCallback(
     (e: unknown) => {
       if (isCallable(onBlur)) onBlur(e);
-      close();
+      if (ctx.interactive) ctx.scheduleClose();
+      else close();
     },
-    [close, onBlur],
+    [close, onBlur, ctx],
   );
 
   const handlePress = useCallback(
     (e: unknown) => {
       if (isCallable(onPress)) onPress(e);
       if (!ctx.enabled || disabled) {
+        return;
+      }
+      if (ctx.interactive) {
+        clearOpenTimer();
+        ctx.cancelClose();
+        const next = !ctx.pinned.current;
+        ctx.pinned.current = next;
+        ctx.setOpen(next);
         return;
       }
       if (ctx.openOnPress) {
@@ -509,6 +569,39 @@ export function TooltipContent({
 
   const handleDismiss = useCallback(() => ctx.setOpen(false), [ctx]);
 
+  useEffect(() => {
+    if (!isWeb || !ctx.interactive || !ctx.open) return;
+    const trigger = ctx.triggerRef.current as unknown as HTMLElement | null;
+    const inside = (target: EventTarget | null) =>
+      target instanceof Node &&
+      (trigger?.contains(target) ||
+        (ctx.contentRef.current as unknown as HTMLElement | null)?.contains(target));
+    const pointer = (event: PointerEvent) => {
+      if (!inside(event.target)) handleDismiss();
+    };
+    const key = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        handleDismiss();
+        if (trigger && document.activeElement !== trigger) {
+          ctx.suppressFocus.current = true;
+          trigger.focus();
+        }
+      }
+    };
+    const focus = (event: FocusEvent) => {
+      if (!inside(event.target)) handleDismiss();
+    };
+    document.addEventListener("pointerdown", pointer, true);
+    document.addEventListener("keydown", key);
+    document.addEventListener("focusin", focus);
+    return () => {
+      document.removeEventListener("pointerdown", pointer, true);
+      document.removeEventListener("keydown", key);
+      document.removeEventListener("focusin", focus);
+    };
+  }, [ctx, handleDismiss]);
+
   if (!ctx.open || !ctx.enabled) return null;
 
   // On web, avoid React Native's <Modal/> implementation (it uses <dialog> and can
@@ -516,9 +609,18 @@ export function TooltipContent({
   // exact same positioning math as DropdownMenu, without hover feedback loops.
   if (isWeb) {
     return createPortal(
-      <View pointerEvents="none" style={styles.portalOverlay}>
+      <View pointerEvents={ctx.interactive ? "box-none" : "none"} style={styles.portalOverlay}>
         <FloatingSurface
-          pointerEvents="none"
+          ref={ctx.contentRef}
+          pointerEvents={ctx.interactive ? "auto" : "none"}
+          {...(ctx.interactive && isWeb
+            ? {
+                onPointerEnter: ctx.cancelClose,
+                onPointerLeave: ctx.scheduleClose,
+                onFocus: ctx.cancelClose,
+                onBlur: ctx.scheduleClose,
+              }
+            : {})}
           entering={FadeIn.duration(80)}
           exiting={FadeOut.duration(80)}
           collapsable={false}
@@ -542,9 +644,19 @@ export function TooltipContent({
       statusBarTranslucent={Platform.OS === "android"}
       onRequestClose={handleDismiss}
     >
-      <Pressable style={styles.overlay} onPress={handleDismiss}>
+      <View style={styles.overlay}>
+        <Pressable style={StyleSheet.absoluteFillObject} onPress={handleDismiss} />
         <FloatingSurface
-          pointerEvents="none"
+          ref={ctx.contentRef}
+          pointerEvents={ctx.interactive ? "auto" : "none"}
+          {...(ctx.interactive && isWeb
+            ? {
+                onPointerEnter: ctx.cancelClose,
+                onPointerLeave: ctx.scheduleClose,
+                onFocus: ctx.cancelClose,
+                onBlur: ctx.scheduleClose,
+              }
+            : {})}
           entering={FadeIn.duration(80)}
           exiting={FadeOut.duration(80)}
           collapsable={false}
@@ -555,7 +667,7 @@ export function TooltipContent({
         >
           {children}
         </FloatingSurface>
-      </Pressable>
+      </View>
     </Modal>
   );
 }

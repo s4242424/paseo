@@ -2,52 +2,60 @@ import { Text, View } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
 import { ProviderUsageCard } from "./card";
 import { providerUsageCopy } from "./copy";
-import type { ProviderUsage, ProviderUsageView } from "./types";
+import type { ProviderUsageView } from "./types";
 
-function matchProvider(
-  providers: ProviderUsage[],
-  activeProviderId: string | null | undefined,
-): ProviderUsage | null {
-  if (!activeProviderId) return null;
-  const target = activeProviderId.toLowerCase();
-  return providers.find((usage) => usage.providerId.toLowerCase() === target) ?? null;
-}
+import { selectTooltipProviders } from "./tooltip-providers";
+import { ProviderAccountSummary } from "./account-controls";
+import type { AccountProvider } from "./accounts";
 
-// Renders the active agent's provider usage inside the context-meter tooltip.
-// Returns nothing when the active provider has no usage entry, so the meter's
-// own context section stays the whole tooltip.
 export function ProviderUsageTooltipSection({
   view,
   activeProviderId,
+  serverId,
+  scopeAvailable = false,
+  onChangeLogin,
 }: {
   view: ProviderUsageView;
   activeProviderId: string | null | undefined;
+  serverId?: string;
+  scopeAvailable?: boolean;
+  onChangeLogin?: (provider: AccountProvider) => void;
 }) {
-  if (view.kind === "loading") {
-    return (
-      <>
-        <View style={styles.divider} />
-        <Text style={styles.detail}>{providerUsageCopy.tooltipLoading}</Text>
-      </>
-    );
-  }
-
-  if (view.kind === "error") {
-    return (
-      <>
-        <View style={styles.divider} />
-        <Text style={styles.error}>{view.message}</Text>
-      </>
-    );
-  }
-
-  const usage = matchProvider(view.payload.providers, activeProviderId);
-  if (!usage) return null;
-
+  const providers = selectTooltipProviders(
+    view.kind === "ready" ? view.payload.providers : [],
+    activeProviderId,
+  );
   return (
     <>
       <View style={styles.divider} />
-      <ProviderUsageCard usage={usage} compact />
+      <Text style={styles.detail}>Account allowances · separate from conversation context</Text>
+      {view.kind === "loading" ? (
+        <Text style={styles.detail}>{providerUsageCopy.tooltipLoading}</Text>
+      ) : null}
+      {view.kind === "error" ? <Text style={styles.error}>{view.message}</Text> : null}
+      {view.kind === "ready" && view.isRefreshing ? (
+        <Text style={styles.detail}>Refreshing allowances; previous observation shown below.</Text>
+      ) : null}
+      {providers.map((usage) => (
+        <View key={usage.providerId}>
+          <View style={styles.divider} />
+          <ProviderUsageCard usage={usage} compact detailed />
+          {onChangeLogin &&
+          (usage.providerId.toLowerCase() === "claude" ||
+            usage.providerId.toLowerCase() === "codex") ? (
+            <ProviderAccountSummary
+              serverId={serverId}
+              provider={usage.providerId.toLowerCase() as AccountProvider}
+              scopeAvailable={scopeAvailable}
+              onChangeLogin={onChangeLogin}
+            />
+          ) : null}
+        </View>
+      ))}
+      <Text style={styles.detail}>
+        Logins are observed on the selected host. They do not prove which account an existing
+        conversation uses.
+      </Text>
     </>
   );
 }

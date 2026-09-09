@@ -1,5 +1,5 @@
 import { defineConfig, configDefaults } from "vitest/config";
-import { playwright } from "@vitest/browser-playwright";
+import { playwright, defineBrowserCommand } from "@vitest/browser-playwright";
 import path from "path";
 import fs from "fs";
 
@@ -35,9 +35,19 @@ export default defineConfig({
           include: ["src/**/*.browser.{test,spec}.{ts,tsx}"],
           browser: {
             enabled: true,
-            provider: playwright(),
+            provider: playwright({launchOptions:{executablePath:process.env.PASEO_TEST_BROWSER_EXECUTABLE}}),
             headless: true,
             connectTimeout: 180_000,
+            commands: {
+              wheelAccountPopover: defineBrowserCommand(async ({ page, frame }) => {
+                const scroll = (await frame()).getByTestId("usage-account-scroll");
+                await scroll.hover();
+                await page.mouse.wheel(0, 900);
+              }),
+              moveOutsidePopover: defineBrowserCommand(async ({ page }) => {
+                await page.mouse.move(5, 5);
+              }),
+            },
             instances: [{ browser: "chromium" }],
             screenshotDirectory: ".vitest-screenshots",
           },

@@ -1,11 +1,13 @@
-import { useCallback, useState } from "react";
-import { Pressable, Text, View } from "react-native";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Pressable, ScrollView, Text, useWindowDimensions } from "react-native";
 import Svg, { Circle } from "react-native-svg";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { useTranslation } from "react-i18next";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ProviderUsageTooltipSection } from "@/provider-usage/tooltip-section";
 import { useProviderUsage } from "@/provider-usage/use-provider-usage";
+import { ProviderAccountDialog } from "@/provider-usage/account-controls";
+import type { AccountProvider } from "@/provider-usage/accounts";
 import { formatTokenCount } from "./context-window-meter.utils";
 
 interface ContextWindowMeterProps {
@@ -14,6 +16,8 @@ interface ContextWindowMeterProps {
   totalCostUsd?: number | null;
   showPercentage?: boolean;
   serverId?: string;
+  workspaceId?: string | null;
+  agentId?: string;
   /** The Paseo provider key, e.g. "claude", "gemini", "codex" */
   provider?: string | null;
   /** Reserve the meter footprint and show a loading ring while usage is pending. */
@@ -96,12 +100,34 @@ function getMeterGeometry(showPercentage: boolean, glyphSize?: number) {
   };
 }
 
+interface AccountDialogScope {
+  provider: AccountProvider;
+  serverId: string;
+  workspaceId: string;
+  agentId: string;
+}
+function dialogMatchesScope(
+  dialog: AccountDialogScope | null,
+  serverId?: string,
+  workspaceId?: string | null,
+  agentId?: string,
+): dialog is AccountDialogScope {
+  return Boolean(
+    dialog &&
+    dialog.serverId === serverId &&
+    dialog.workspaceId === workspaceId &&
+    dialog.agentId === agentId,
+  );
+}
+
 export function ContextWindowMeter({
   maxTokens,
   usedTokens,
   totalCostUsd,
   showPercentage = false,
   serverId,
+  workspaceId,
+  agentId,
   provider,
   pending = false,
   glyphSize,
@@ -109,6 +135,28 @@ export function ContextWindowMeter({
   const { theme } = useUnistyles();
   const { t } = useTranslation();
   const [isTooltipOpen, setIsTooltipOpen] = useState(false);
+  const [dialog, setDialog] = useState<AccountDialogScope | null>(null);
+  const viewport = useWindowDimensions();
+  const popoverWidth = Math.min(360, Math.max(200, viewport.width - 32));
+  const popoverHeight = Math.max(120, Math.min(520, viewport.height - 80));
+  const scrollStyle = useMemo(
+    () => ({ width: popoverWidth - 16, maxHeight: popoverHeight }),
+    [popoverWidth, popoverHeight],
+  );
+  const accessibilityState = useMemo(() => ({ expanded: isTooltipOpen }), [isTooltipOpen]);
+  const closeDialog = useCallback(() => setDialog(null), []);
+  useEffect(() => {
+    setIsTooltipOpen(false);
+    setDialog(null);
+  }, [serverId, workspaceId, agentId]);
+  const changeLogin = useCallback(
+    (accountProvider: AccountProvider) => {
+      if (!serverId || !workspaceId || !agentId) return;
+      setIsTooltipOpen(false);
+      setDialog({ provider: accountProvider, serverId, workspaceId, agentId });
+    },
+    [serverId, workspaceId, agentId],
+  );
   const { view: providerUsageView, refresh: refreshProviderUsage } = useProviderUsage(
     serverId ?? null,
     { enabled: isTooltipOpen },
@@ -127,39 +175,11 @@ export function ContextWindowMeter({
 
   const geometry = getMeterGeometry(showPercentage, glyphSize);
 
-  // No usage yet: reserve the footprint with a track-only ring while a session is
-  // active so the real ring fades in without shifting siblings. Render nothing when
-  // no usage is expected.
-  if (percentage === null || maxTokens === null || usedTokens === null) {
-    if (!pending) {
-      return null;
-    }
-    return (
-      <View style={geometry.containerStyle}>
-        <Svg
-          width={geometry.svgSize}
-          height={geometry.svgSize}
-          viewBox={`0 0 ${geometry.svgSize} ${geometry.svgSize}`}
-          style={styles.svg}
-          accessibilityElementsHidden
-          importantForAccessibility="no-hide-descendants"
-        >
-          <Circle
-            cx={geometry.center}
-            cy={geometry.center}
-            r={geometry.radius}
-            fill="none"
-            stroke={theme.colors.surface3}
-            strokeWidth={geometry.strokeWidth}
-          />
-        </Svg>
-        {showPercentage ? <View style={styles.skeletonLabel} /> : null}
-      </View>
-    );
-  }
+  // Host allowance access remains available when the context measurement is unknown.
+  if (percentage === null && !pending && !serverId) return null;
 
-  const clampedPercentage = clampPercentage(percentage);
-  const roundedPercentage = Math.round(percentage);
+  const clampedPercentage = clampPercentage(percentage ?? 0);
+  const roundedPercentage = percentage === null ? null : Math.round(percentage);
   const { svgSize, center, radius, strokeWidth, circumference, containerStyle } = geometry;
   const dashOffset = circumference - (clampedPercentage / 100) * circumference;
   const colors = getMeterColors(clampedPercentage, theme);
@@ -167,76 +187,133 @@ export function ContextWindowMeter({
     typeof totalCostUsd === "number" ? formatSessionCost(totalCostUsd) : null;
 
   return (
-    <Tooltip
-      open={isTooltipOpen}
-      onOpenChange={handleTooltipOpenChange}
-      delayDuration={0}
-      enabledOnDesktop
-      enabledOnMobile
-    >
-      <TooltipTrigger asChild triggerRefProp="ref">
-        <Pressable
-          style={containerStyle}
-          testID="context-window-meter"
-          accessibilityRole="image"
-          accessibilityLabel={t("contextWindow.accessibility", {
-            percentage: roundedPercentage,
-          })}
-        >
-          <Svg
-            width={svgSize}
-            height={svgSize}
-            viewBox={`0 0 ${svgSize} ${svgSize}`}
-            style={styles.svg}
-            accessibilityElementsHidden
-            importantForAccessibility="no-hide-descendants"
+    <>
+      <Tooltip
+        open={isTooltipOpen}
+        onOpenChange={handleTooltipOpenChange}
+        delayDuration={0}
+        enabledOnDesktop
+        enabledOnMobile
+        interactive
+      >
+        <TooltipTrigger asChild triggerRefProp="ref">
+          <Pressable
+            style={containerStyle}
+            testID="context-window-meter"
+            accessibilityRole="button"
+            accessibilityState={accessibilityState}
+            accessibilityLabel={
+              roundedPercentage === null
+                ? "Usage and accounts · context unavailable"
+                : `${t("contextWindow.accessibility", { percentage: roundedPercentage })}. Usage and accounts`
+            }
           >
-            <Circle
-              cx={center}
-              cy={center}
-              r={radius}
-              fill="none"
-              stroke={colors.track}
-              strokeWidth={strokeWidth}
+            <Svg
+              width={svgSize}
+              height={svgSize}
+              viewBox={`0 0 ${svgSize} ${svgSize}`}
+              style={styles.svg}
+              accessibilityElementsHidden
+              importantForAccessibility="no-hide-descendants"
+            >
+              <Circle
+                cx={center}
+                cy={center}
+                r={radius}
+                fill="none"
+                stroke={colors.track}
+                strokeWidth={strokeWidth}
+              />
+              {percentage !== null ? (
+                <Circle
+                  cx={center}
+                  cy={center}
+                  r={radius}
+                  fill="none"
+                  stroke={colors.progress}
+                  strokeWidth={strokeWidth}
+                  strokeLinecap="round"
+                  strokeDasharray={circumference}
+                  strokeDashoffset={dashOffset}
+                />
+              ) : null}
+            </Svg>
+            {showPercentage ? (
+              <Text style={styles.percentageLabel}>
+                {roundedPercentage === null ? "—" : `${roundedPercentage}%`}
+              </Text>
+            ) : null}
+          </Pressable>
+        </TooltipTrigger>
+        <TooltipContent
+          side="top"
+          align="center"
+          offset={8}
+          maxWidth={popoverWidth}
+          testID="usage-account-popover"
+        >
+          <ScrollView
+            testID="usage-account-scroll"
+            style={scrollStyle}
+            contentContainerStyle={styles.tooltipContent}
+          >
+            <ContextUsageDetails
+              maxTokens={maxTokens}
+              usedTokens={usedTokens}
+              percentage={roundedPercentage}
+              formattedSessionCost={formattedSessionCost}
             />
-            <Circle
-              cx={center}
-              cy={center}
-              r={radius}
-              fill="none"
-              stroke={colors.progress}
-              strokeWidth={strokeWidth}
-              strokeLinecap="round"
-              strokeDasharray={circumference}
-              strokeDashoffset={dashOffset}
+            <ProviderUsageTooltipSection
+              view={providerUsageView}
+              activeProviderId={provider}
+              serverId={serverId}
+              scopeAvailable={Boolean(serverId && workspaceId && agentId)}
+              onChangeLogin={changeLogin}
             />
-          </Svg>
-          {showPercentage ? (
-            <Text style={styles.percentageLabel}>{`${roundedPercentage}%`}</Text>
-          ) : null}
-        </Pressable>
-      </TooltipTrigger>
-      <TooltipContent side="top" align="center" offset={8}>
-        <View style={styles.tooltipContent}>
-          <Text style={styles.tooltipTitle}>{t("contextWindow.title")}</Text>
-          <Text style={styles.tooltipText}>
-            {t("contextWindow.used", { percentage: roundedPercentage })}
-          </Text>
-          <Text style={styles.tooltipDetail}>
-            {t("contextWindow.tokens", {
-              used: formatTokenCount(usedTokens),
-              max: formatTokenCount(maxTokens),
-            })}
-          </Text>
-          {formattedSessionCost ? (
-            <Text style={styles.tooltipDetail}>
-              {t("contextWindow.sessionCost", { cost: formattedSessionCost })}
-            </Text>
-          ) : null}
-          <ProviderUsageTooltipSection view={providerUsageView} activeProviderId={provider} />
-        </View>
-      </TooltipContent>
-    </Tooltip>
+          </ScrollView>
+        </TooltipContent>
+      </Tooltip>
+      {dialogMatchesScope(dialog, serverId, workspaceId, agentId) ? (
+        <ProviderAccountDialog {...dialog} onClose={closeDialog} />
+      ) : null}
+    </>
+  );
+}
+
+function ContextUsageDetails({
+  maxTokens,
+  usedTokens,
+  percentage,
+  formattedSessionCost,
+}: {
+  maxTokens: number | null;
+  usedTokens: number | null;
+  percentage: number | null;
+  formattedSessionCost: string | null;
+}) {
+  const { t } = useTranslation();
+  return (
+    <>
+      <Text style={styles.tooltipTitle}>{t("contextWindow.title")}</Text>
+      <Text style={styles.tooltipText}>
+        {percentage === null
+          ? "Context usage unavailable"
+          : t("contextWindow.used", { percentage: percentage })}
+      </Text>
+      {usedTokens !== null && maxTokens !== null && percentage !== null ? (
+        <Text style={styles.tooltipDetail}>
+          {t("contextWindow.tokens", {
+            used: formatTokenCount(usedTokens),
+            max: formatTokenCount(maxTokens),
+          })}
+        </Text>
+      ) : null}
+      {formattedSessionCost ? (
+        <Text style={styles.tooltipDetail}>
+          {t("contextWindow.sessionCost", { cost: formattedSessionCost })}
+        </Text>
+      ) : null}
+    </>
   );
 }
 

@@ -24,8 +24,16 @@ function fillToneStyle(tone: ProviderUsageTone) {
   }
 }
 
-export function ProviderUsageWindowBar({ window }: { window: ProviderUsageWindow }) {
+export function ProviderUsageWindowBar({
+  window,
+  detailed = false,
+}: {
+  window: ProviderUsageWindow;
+  detailed?: boolean;
+}) {
   const usedPct = resolveUsedPct(window);
+  const remaining = window.remainingPct ?? (usedPct === null ? null : Math.max(0, 100 - usedPct));
+  const resetDate = window.resetsAt ? new Date(window.resetsAt) : null;
   const tone = window.tone ?? deriveTone(usedPct);
 
   const fillWidth = clampPct(usedPct ?? 0);
@@ -52,6 +60,15 @@ export function ProviderUsageWindowBar({ window }: { window: ProviderUsageWindow
           ) : null}
         </Text>
       </View>
+      {detailed ? (
+        <Text style={styles.reset}>
+          {usedPct === null ? "Used allowance unavailable" : `${formatPct(usedPct)} used`}
+          {remaining === null ? " · Remaining unavailable" : ` · ${formatPct(remaining)} remaining`}
+        </Text>
+      ) : null}
+      {detailed && resetDate && Number.isFinite(resetDate.getTime()) ? (
+        <Text style={styles.reset}>Resets {resetDate.toLocaleString("en-GB")}</Text>
+      ) : null}
       <View style={styles.track}>
         <View style={fillStyle} />
       </View>

@@ -74,17 +74,17 @@ export function useProviderUsage(
     if (!supportsProviderUsage) {
       return { kind: "error", message: providerUsageCopy.hostUpgradeRequired };
     }
+    if (query.isError) {
+      return {
+        kind: "error",
+        message: query.error instanceof Error ? query.error.message : String(query.error),
+      };
+    }
     if (query.data) {
       return {
         kind: "ready",
         payload: query.data,
         isRefreshing: query.isFetching,
-      };
-    }
-    if (query.isError) {
-      return {
-        kind: "error",
-        message: query.error instanceof Error ? query.error.message : String(query.error),
       };
     }
     return { kind: "loading" };
