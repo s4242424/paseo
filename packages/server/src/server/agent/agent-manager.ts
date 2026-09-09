@@ -691,6 +691,8 @@ export class AgentManager {
   private readonly lifecycleMutationTails = new Map<string, Promise<void>>();
   private readonly sessionOwnershipTails = new Map<string, Promise<void>>();
   private readonly sessionReleaseFences = new Map<string, Promise<void>>();
+  private readonly unregisteredWriters = new Map<string, AgentSession>();
+  private readonly unregisteredSessions = new Set<AgentSession>();
   private readonly failedSessionReleases = new Set<string>();
   private readonly agentStreamCoalescer: AgentStreamCoalescer;
   private mcpBaseUrl: string | null;
@@ -1206,8 +1208,8 @@ export class AgentManager {
       "resumeAgentFromPersistence",
     );
     return this.trackAgentRegistrationOperation(
-      this.runSessionOwnershipMutation(`native:${handle.provider}:${handle.sessionId}`, () =>
-        this.runSessionOwnershipMutation(resolvedAgentId, () =>
+      this.runSessionOwnershipMutation(resolvedAgentId, () =>
+        this.runSessionOwnershipMutation(`native:${handle.provider}:${handle.sessionId}`, () =>
           this.resumeAgentFromPersistenceInternal(
             handle,
             overrides,
@@ -1251,6 +1253,7 @@ export class AgentManager {
         "Native conversation already has a managed owner; release it before resuming",
       );
     }
+    await this.releaseUnregisteredWriter(handle.provider, handle.sessionId);
     const metadata = (handle.metadata ?? {}) as Partial<AgentSessionConfig>;
     const mergedConfig = {
       ...metadata,
@@ -1291,7 +1294,11 @@ export class AgentManager {
     workspaceId: string;
     labels?: Record<string, string>;
   }): Promise<ManagedAgent> {
-    return this.trackAgentRegistrationOperation(this.importProviderSessionInternal(input));
+    return this.trackAgentRegistrationOperation(
+      this.runSessionOwnershipMutation(`native:${input.provider}:${input.providerHandleId}`, () =>
+        this.importProviderSessionInternal(input),
+      ),
+    );
   }
 
   private async importProviderSessionInternal(input: {
@@ -1304,6 +1311,18 @@ export class AgentManager {
     this.assertAcceptingAgentRegistrations();
     const resolvedAgentId = validateAgentId(this.idFactory(), "importProviderSession");
     this.requireEnabledProvider(input.provider);
+    if (
+      [...this.agents.values()].some(
+        (agent) =>
+          agent.persistence?.provider === input.provider &&
+          agent.persistence.sessionId === input.providerHandleId,
+      )
+    ) {
+      throw new Error(
+        "Native conversation already has a managed owner; release it before importing",
+      );
+    }
+    await this.releaseUnregisteredWriter(input.provider, input.providerHandleId);
 
     const client = await this.requireAvailableClient({ provider: input.provider });
     if (!client.importSession) {
@@ -1369,11 +1388,21 @@ export class AgentManager {
     options?: { rehydrateFromDisk?: boolean },
   ): Promise<ManagedAgent> {
     return this.trackAgentRegistrationOperation(
-      this.runSessionOwnershipMutation(agentId, () =>
-        this.runForegroundMutation(agentId, () =>
-          this.reloadAgentSessionInternal(agentId, overrides, options),
-        ),
-      ),
+      this.runSessionOwnershipMutation(agentId, () => {
+        const handle = this.requireAgent(agentId).persistence;
+        const reload = () =>
+          this.runForegroundMutation(agentId, () =>
+            this.reloadAgentSessionInternal(agentId, overrides, options),
+          );
+        // Hold the native identity across removal and replacement registration,
+        // so an import under another managed ID cannot acquire the same writer.
+        return handle
+          ? this.runSessionOwnershipMutation(
+              `native:${handle.provider}:${handle.sessionId}`,
+              reload,
+            )
+          : reload();
+      }),
     );
   }
 
@@ -3302,11 +3331,27 @@ export class AgentManager {
     }
   }
 
+  private async releaseUnregisteredWriter(
+    provider: AgentProvider,
+    sessionId: string,
+  ): Promise<void> {
+    const session = this.unregisteredWriters.get(`native:${provider}:${sessionId}`);
+    if (session) await this.closeUnregisteredSession(session);
+  }
+
   private async closeUnregisteredSession(session: AgentSession): Promise<void> {
+    this.unregisteredSessions.add(session);
+    const handle = session.describePersistence();
+    const key = handle ? `native:${handle.provider}:${handle.sessionId}` : null;
+    if (key) this.unregisteredWriters.set(key, session);
     try {
       await session.close();
+      this.unregisteredSessions.delete(session);
+      if (key && this.unregisteredWriters.get(key) === session)
+        this.unregisteredWriters.delete(key);
     } catch (error) {
-      this.logger.warn({ err: error }, "Failed to close unregistered agent session");
+      this.logger.warn({ err: error }, "Unregistered native writer release is unconfirmed");
+      throw error;
     }
   }
 
@@ -4663,6 +4708,17 @@ export class AgentManager {
    */
   async flushForShutdown(): Promise<void> {
     await this.flushTasks({ includeAgentRegistrations: true });
+    const releases = await Promise.allSettled(
+      [...this.unregisteredSessions].map((session) => this.closeUnregisteredSession(session)),
+    );
+    const failures = releases.filter(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    if (failures.length)
+      throw new AggregateError(
+        failures.map((result) => result.reason),
+        "Shutdown incomplete: native writer release is unconfirmed",
+      );
   }
 
   private async flushTasks(options: { includeAgentRegistrations: boolean }): Promise<void> {

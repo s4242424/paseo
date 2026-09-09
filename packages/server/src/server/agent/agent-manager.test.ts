@@ -2378,6 +2378,90 @@ test("reload waits for exclusive release and keeps unrelated agents usable", asy
   await manager.closeAgent(other.id);
 });
 
+test("reload reserves the native conversation while the replacement is registering", async () => {
+  const started = deferred<void>();
+  const release = deferred<void>();
+  const client = new TestAgentClient();
+  const resume = client.resumeSession.bind(client);
+  let calls = 0;
+  client.resumeSession = async (handle, config) => {
+    calls += 1;
+    started.resolve();
+    await release.promise;
+    const replacement = await resume(handle, config);
+    replacement.describePersistence = () => handle;
+    return replacement;
+  };
+  const manager = new AgentManager({ clients: { codex: client }, logger, idFactory: randomUUID });
+  const original = await manager.createAgent(
+    { provider: "codex", cwd: process.cwd() },
+    undefined,
+    {},
+  );
+  const handle = original.persistence!;
+  const reload = manager.reloadAgentSession(original.id);
+  await started.promise;
+  expect(manager.getAgent(original.id)).toBeNull();
+  const competing = manager.resumeAgentFromPersistence(handle, undefined, randomUUID());
+  const rejected = expect(competing).rejects.toThrow("managed owner");
+  await Promise.resolve();
+  expect(calls).toBe(1);
+  release.resolve();
+  await reload;
+  await rejected;
+  expect(calls).toBe(1);
+  await manager.closeAgent(original.id);
+});
+
+test("failed replacement cleanup retains native ownership across resume and import retries", async () => {
+  const original = new TestAgentSession({ provider: "codex", cwd: process.cwd() });
+  const handle = original.describePersistence();
+  const replacement = new TestAgentSession({ provider: "codex", cwd: process.cwd() });
+  replacement.describePersistence = () => handle;
+  let releaseAllowed = false;
+  replacement.close = async () => {
+    if (!releaseAllowed) throw new Error("replacement still alive");
+  };
+  const client = new TestAgentClient();
+  client.createSession = async () => original;
+  let resumeCalls = 0;
+  client.resumeSession = async () => {
+    resumeCalls += 1;
+    return replacement;
+  };
+  let importCalls = 0;
+  client.importSession = async () => {
+    importCalls += 1;
+    throw new Error("must not import");
+  };
+  const manager = new AgentManager({ clients: { codex: client }, logger, idFactory: randomUUID });
+  const agent = await manager.createAgent({ provider: "codex", cwd: process.cwd() }, undefined, {});
+  await expect(
+    manager.reloadAgentSession(agent.id, {
+      mcpServers: { hub: { type: "http", url: "https://hub.test/mcp" } },
+    }),
+  ).rejects.toThrow("replacement still alive");
+  await expect(manager.resumeAgentFromPersistence(handle)).rejects.toThrow(
+    "replacement still alive",
+  );
+  await expect(
+    manager.importProviderSession({
+      provider: "codex",
+      providerHandleId: handle.sessionId,
+      cwd: process.cwd(),
+      workspaceId: randomUUID(),
+    }),
+  ).rejects.toThrow("replacement still alive");
+  expect(resumeCalls).toBe(1);
+  expect(importCalls).toBe(0);
+  await expect(manager.flushForShutdown()).rejects.toThrow("Shutdown incomplete");
+  releaseAllowed = true;
+  await manager.flushForShutdown();
+  const resumed = await manager.resumeAgentFromPersistence(handle);
+  expect(resumeCalls).toBe(2);
+  await manager.closeAgent(resumed.id);
+});
+
 test("late close acknowledgement permits one explicit reload without repeating close", async () => {
   const release = deferred<void>();
   let closeCalls = 0;

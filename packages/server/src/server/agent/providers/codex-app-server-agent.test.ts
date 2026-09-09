@@ -1032,7 +1032,8 @@ describe("Codex app-server provider", () => {
       await vi.advanceTimersByTimeAsync(2_000);
       expect(child.kill).toHaveBeenCalledWith("SIGKILL");
 
-      await vi.advanceTimersByTimeAsync(1_000);
+      child.signalCode = "SIGKILL";
+      child.emit("exit", null, "SIGKILL");
       await expect(disposePromise).resolves.toBeUndefined();
     } finally {
       vi.useRealTimers();

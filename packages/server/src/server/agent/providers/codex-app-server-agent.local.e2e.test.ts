@@ -1,11 +1,14 @@
-import { describe, expect, test } from "vitest";
-import { execFileSync } from "node:child_process";
+import { describe, expect, test, vi } from "vitest";
+import { type ChildProcessWithoutNullStreams, execFileSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { createServer } from "node:http";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { once } from "node:events";
 
+import { randomUUID } from "node:crypto";
+import { AgentManager } from "../agent-manager.js";
+import type { AgentSession } from "../agent-sdk-types.js";
 import { CodexAppServerAgentClient } from "./codex-app-server-agent.js";
 import { createTestLogger } from "../../../test-utils/test-logger.js";
 import type { AgentStreamEvent } from "../agent-sdk-types.js";
@@ -173,7 +176,7 @@ function writeMockCodexConfig(codexHome: string, serverUrl: string): void {
     path.join(codexHome, "config.toml"),
     `
 model = "mock-model"
-approval_policy = "untrusted"
+approval_policy = "never"
 sandbox_mode = "read-only"
 
 model_provider = "mock_provider"
@@ -214,6 +217,109 @@ function waitForEvent<TEvent extends AgentStreamEvent>(params: {
 }
 
 describe("Codex app-server provider (local e2e)", () => {
+  test.runIf(isCodexInstalled())(
+    "reload continues one native conversation only after the old process exits",
+    async () => {
+      const cwd = mkdtempSync(path.join(os.tmpdir(), "codex-exclusive-cwd-"));
+      const codexHome = mkdtempSync(path.join(os.tmpdir(), "codex-exclusive-home-"));
+      const server = await startMockResponsesServer([
+        assistantMessageSse("first response"),
+        assistantMessageSse("continued response"),
+      ]);
+      const children: ChildProcessWithoutNullStreams[] = [];
+      const sessions: AgentSession[] = [];
+      const logger = createTestLogger();
+      const client = new CodexAppServerAgentClient(logger);
+      const spawnOwner = client as unknown as {
+        spawnAppServer: (
+          env?: Record<string, string>,
+          options?: { goalsEnabled?: boolean; agentId?: string },
+        ) => Promise<ChildProcessWithoutNullStreams>;
+      };
+      const spawn = spawnOwner.spawnAppServer.bind(client);
+      vi.spyOn(spawnOwner, "spawnAppServer").mockImplementation(async (env, options) => {
+        for (const previous of children)
+          expect(previous.exitCode !== null || previous.signalCode !== null).toBe(true);
+        const child = await spawn(env, options);
+        children.push(child);
+        return child;
+      });
+      const create = client.createSession.bind(client);
+      const resume = client.resumeSession.bind(client);
+      client.createSession = async (config, context) => {
+        const session = await create(config, {
+          ...context,
+          env: { ...context?.env, CODEX_HOME: codexHome },
+        });
+        sessions.push(session);
+        return session;
+      };
+      client.resumeSession = async (handle, config, context, options) => {
+        const session = await resume(
+          handle,
+          config,
+          { ...context, env: { ...context?.env, CODEX_HOME: codexHome } },
+          options,
+        );
+        sessions.push(session);
+        return session;
+      };
+      const manager = new AgentManager({
+        clients: { codex: client },
+        logger,
+        idFactory: randomUUID,
+      });
+      let agentId: string | undefined;
+      const turn = async (session: AgentSession, prompt: string) => {
+        const finished = waitForEvent({
+          session,
+          timeoutMs: 15000,
+          label: "native turn completion",
+          predicate: (
+            event,
+          ): event is Extract<AgentStreamEvent, { type: "turn_completed" | "turn_failed" }> =>
+            event.type === "turn_completed" || event.type === "turn_failed",
+        });
+        await session.startTurn(prompt);
+        expect((await finished).type).toBe("turn_completed");
+      };
+      try {
+        writeMockCodexConfig(codexHome, server.url);
+        const agent = await manager.createAgent(
+          {
+            provider: "codex",
+            cwd,
+            modeId: "auto",
+            model: "mock-model",
+            thinkingOptionId: "medium",
+          },
+          undefined,
+          {},
+        );
+        agentId = agent.id;
+        await turn(sessions[0]!, "Remember the first exchange.");
+        const handle = sessions[0]!.describePersistence();
+        await manager.reloadAgentSession(agent.id, undefined, { rehydrateFromDisk: true });
+        expect(sessions[1]!.describePersistence().sessionId).toBe(handle.sessionId);
+        await turn(sessions[1]!, "Continue this conversation.");
+        expect(children).toHaveLength(2);
+        expect(server.requestBodies.at(-1)).toContain("Remember the first exchange.");
+        expect(server.requestBodies.at(-1)).toContain("first response");
+        expect(server.requestBodies.at(-1)).toContain("Continue this conversation.");
+      } finally {
+        if (agentId) await manager.closeAgent(agentId);
+        for (const session of sessions) await session.close();
+        expect(
+          children.every((child) => child.exitCode !== null || child.signalCode !== null),
+        ).toBe(true);
+        await server.close();
+        rmSync(cwd, { recursive: true, force: true });
+        rmSync(codexHome, { recursive: true, force: true });
+      }
+    },
+    45000,
+  );
+
   test.runIf(isCodexInstalled())(
     "surfaces request_user_input from the app-server as question permissions and timeline tool calls",
     async () => {

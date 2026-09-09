@@ -590,6 +590,7 @@ test("session close disposes a provider that arrives from an in-flight reconnect
     let closeFinished = false;
     const close = session.close().then(() => {
       closeFinished = true;
+          return undefined;
     });
     await Promise.resolve();
     expect(closeFinished).toBe(false);
