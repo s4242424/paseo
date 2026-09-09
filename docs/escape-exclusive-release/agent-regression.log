@@ -1,0 +1,37 @@
+
+ RUN  v4.1.6 /Users/clean/dev/paseo-escape-exclusive-release-20260909/packages/server
+
+stdout | src/server/agent/providers/provider-availability.test.ts
+[dotenv@17.3.1] injecting env (0) from .env.test -- tip: ⚙️  write to custom object with { processEnv: myObject }
+[dotenv@17.3.1] injecting env (0) from ../.env -- tip: ⚙️  enable debug logging with { debug: true }
+
+ ❯ src/server/agent/providers/provider-availability.test.ts (6 tests | 1 failed) 62ms
+     × Codex reports available from a Microsoft Store install path when PATH misses codex 37ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/server/agent/providers/provider-availability.test.ts > default provider availability > Codex reports available from a Microsoft Store install path when PATH misses codex
+AssertionError: expected null to be '/var/folders/63/phn3lhc90yz8wyxk6tm1c…' // Object.is equality
+
+- Expected:
+"/var/folders/63/phn3lhc90yz8wyxk6tm1c6b00000gr/T/provider-availability-codex-store-IjKCoC/Packages/OpenAI.Codex_abc123/LocalCache/Local/OpenAI/Codex/bin/codex.exe"
+
++ Received:
+null
+
+ ❯ src/server/agent/providers/provider-availability.test.ts:91:44
+     89|       const client = new CodexAppServerAgentClient(createTestLogger());
+     90|
+     91|       await expect(findDefaultCodexBinary()).resolves.toBe(codexExe);
+       |                                            ^
+     92|       await expect(client.isAvailable()).resolves.toBe(true);
+     93|     } finally {
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed | 130 passed | 3 skipped (134)
+      Tests  1 failed | 2033 passed | 21 skipped (2055)
+   Start at  19:13:21
+   Duration  73.27s (transform 6.11s, setup 1.30s, import 18.52s, tests 39.11s, environment 7ms)
+

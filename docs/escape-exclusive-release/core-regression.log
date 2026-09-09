@@ -1,0 +1,9 @@
+
+ RUN  v4.1.6 /Users/clean/dev/paseo-escape-exclusive-release-20260909/packages/server
+
+
+ Test Files  4 passed (4)
+      Tests  341 passed (341)
+   Start at  19:11:00
+   Duration  17.95s (transform 2.76s, setup 54ms, import 4.84s, tests 12.22s, environment 0ms)
+
