@@ -3301,6 +3301,8 @@ export class CodexAppServerAgentSession implements AgentSession {
     cancelRequested: boolean;
   } | null = null;
   private client: CodexAppServerClient | null = null;
+  private closingClient: CodexAppServerClient | null = null;
+  private clientDisposal: Promise<void> | null = null;
   private readonly subscribers = new Set<(event: AgentStreamEvent) => void>();
   private nextTurnOrdinal = 0;
   private activeForegroundTurnId: string | null = null;
@@ -3451,7 +3453,8 @@ export class CodexAppServerAgentSession implements AgentSession {
     const child = await this.spawnAppServer();
     const client = new CodexAppServerClient(child, this.logger, () => this.traceContext());
     if (this.closed) {
-      await client.dispose();
+      this.closingClient = client;
+      await this.disposeClient();
       throw this.createClosedError();
     }
     this.client = client;
@@ -4776,6 +4779,10 @@ export class CodexAppServerAgentSession implements AgentSession {
     this.activeClientMessageId = null;
     this.pendingForegroundTurnIdentification?.resolve(null);
     this.pendingForegroundTurnIdentification = null;
+    // A spawn already in flight may still produce an owned child. Its cleanup
+    // must settle before close can acknowledge exclusive release.
+    await this.disposeClient();
+    await this.connectionPromise?.catch(() => undefined);
     await this.disposeClient();
     this.currentThreadId = null;
   }
@@ -4794,12 +4801,21 @@ export class CodexAppServerAgentSession implements AgentSession {
   }
 
   private async disposeClient(): Promise<void> {
-    const client = this.client;
+    if (this.clientDisposal) return this.clientDisposal;
+    const client = this.client ?? this.closingClient;
     this.client = null;
+    this.closingClient = client;
     this.connected = false;
     this.currentTurnId = null;
     if (client) {
-      await client.dispose();
+      const disposal = client.dispose();
+      this.clientDisposal = disposal;
+      try {
+        await disposal;
+        if (this.closingClient === client) this.closingClient = null;
+      } finally {
+        if (this.clientDisposal === disposal) this.clientDisposal = null;
+      }
     }
   }
 

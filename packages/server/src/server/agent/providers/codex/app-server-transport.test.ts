@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 
 import { createTestLogger } from "../../../../test-utils/test-logger.js";
 import {
@@ -8,6 +8,42 @@ import {
 import { CodexAppServerClient } from "./app-server-transport.js";
 
 describe("Codex app-server transport", () => {
+  test("dispose coalesces callers and rejects unconfirmed exit until an observed exit", async () => {
+    vi.useFakeTimers();
+    const child = createCodexAppServerChildProcess();
+    child.kill = vi.fn(() => true);
+    const client = new CodexAppServerClient(child, createTestLogger());
+    try {
+      const first = client.dispose();
+      expect(client.dispose()).toBe(first);
+      const rejected = expect(first).rejects.toThrow("exit is unconfirmed");
+      await vi.advanceTimersByTimeAsync(3001);
+      await rejected;
+      expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+      expect(child.kill).toHaveBeenCalledWith("SIGKILL");
+      Object.defineProperty(child, "signalCode", { value: "SIGKILL" });
+      child.emit("exit", null, "SIGKILL");
+      await expect(client.dispose()).resolves.toBeUndefined();
+    } finally {
+      child.stdout.end();
+      child.stderr.end();
+      child.stdin.end();
+      vi.useRealTimers();
+    }
+  });
+
+  test("an error notification alone never acknowledges process exit", async () => {
+    const child = createCodexAppServerChildProcess();
+    const kill = vi.spyOn(child, "kill");
+    const client = new CodexAppServerClient(child, createTestLogger());
+    child.emit("error", new Error("Synthetic transport error, process still owned"));
+    await client.dispose();
+    expect(kill).toHaveBeenCalledWith("SIGTERM");
+    child.stdout.end();
+    child.stderr.end();
+    child.stdin.end();
+  });
+
   test("ignores non-JSON stdout lines without dropping pending requests", async () => {
     const child = createCodexAppServerChildProcess();
     const client = new CodexAppServerClient(child, createTestLogger());

@@ -175,6 +175,7 @@ export class CodexAppServerClient {
   private unexpectedTerminationHandler: UnexpectedTerminationHandler | null = null;
   private nextId = 1;
   private disposed = false;
+  private disposePromise: Promise<void> | null = null;
   private stderrBuffer = "";
 
   constructor(
@@ -256,11 +257,25 @@ export class CodexAppServerClient {
     this.child.stdin.write(`${JSON.stringify(payload)}\n`);
   }
 
-  async dispose(): Promise<void> {
-    if (this.disposed) return;
+  dispose(): Promise<void> {
+    if (this.disposePromise) return this.disposePromise;
+    const disposal = this.disposeAndConfirmExit();
+    this.disposePromise = disposal;
+    void disposal.catch(() => {
+      if (this.disposePromise === disposal) this.disposePromise = null;
+    });
+    return disposal;
+  }
+
+  private async disposeAndConfirmExit(): Promise<void> {
     this.disposed = true;
     this.unexpectedTerminationHandler = null;
     this.rl.close();
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error("Codex app-server client is closing"));
+    }
+    this.pending.clear();
     try {
       this.child.stdin.end();
     } catch {
@@ -281,6 +296,7 @@ export class CodexAppServerClient {
         { timeoutMs: APP_SERVER_FORCE_SHUTDOWN_TIMEOUT_MS },
         "Codex app-server did not report exit after SIGKILL",
       );
+      throw new Error("Codex app-server exit is unconfirmed after SIGKILL");
     }
   }
 

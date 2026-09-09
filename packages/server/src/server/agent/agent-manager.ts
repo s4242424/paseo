@@ -82,7 +82,7 @@ import {
   type ProviderSubagentStoreEvent,
 } from "./provider-subagents/store.js";
 
-const RELOAD_SESSION_CLOSE_TIMEOUT_MS = 3_000;
+const RELOAD_SESSION_CLOSE_TIMEOUT_MS = 5_000;
 const INTERRUPT_SESSION_TIMEOUT_MS = 2_000;
 const STORED_AGENT_CAPABILITIES: AgentCapabilityFlags = {
   supportsStreaming: false,
@@ -689,6 +689,9 @@ export class AgentManager {
   private readonly agentRegistrationTasks = new Set<Promise<void>>();
   private readonly inFlightAgentCloses = new Map<string, Promise<void>>();
   private readonly lifecycleMutationTails = new Map<string, Promise<void>>();
+  private readonly sessionOwnershipTails = new Map<string, Promise<void>>();
+  private readonly sessionReleaseFences = new Map<string, Promise<void>>();
+  private readonly failedSessionReleases = new Set<string>();
   private readonly agentStreamCoalescer: AgentStreamCoalescer;
   private mcpBaseUrl: string | null;
   private readonly mcpAuthToken: string | null;
@@ -1198,8 +1201,22 @@ export class AgentManager {
     },
     resumeOptions?: AgentResumeSessionOptions,
   ): Promise<ManagedAgent> {
+    const resolvedAgentId = validateAgentId(
+      agentId ?? this.idFactory(),
+      "resumeAgentFromPersistence",
+    );
     return this.trackAgentRegistrationOperation(
-      this.resumeAgentFromPersistenceInternal(handle, overrides, agentId, options, resumeOptions),
+      this.runSessionOwnershipMutation(`native:${handle.provider}:${handle.sessionId}`, () =>
+        this.runSessionOwnershipMutation(resolvedAgentId, () =>
+          this.resumeAgentFromPersistenceInternal(
+            handle,
+            overrides,
+            resolvedAgentId,
+            options,
+            resumeOptions,
+          ),
+        ),
+      ),
     );
   }
 
@@ -1222,6 +1239,18 @@ export class AgentManager {
       agentId ?? this.idFactory(),
       "resumeAgentFromPersistence",
     );
+    if (
+      this.agents.has(resolvedAgentId) ||
+      [...this.agents.values()].some(
+        (agent) =>
+          agent.persistence?.provider === handle.provider &&
+          agent.persistence.sessionId === handle.sessionId,
+      )
+    ) {
+      throw new Error(
+        "Native conversation already has a managed owner; release it before resuming",
+      );
+    }
     const metadata = (handle.metadata ?? {}) as Partial<AgentSessionConfig>;
     const mergedConfig = {
       ...metadata,
@@ -1340,7 +1369,11 @@ export class AgentManager {
     options?: { rehydrateFromDisk?: boolean },
   ): Promise<ManagedAgent> {
     return this.trackAgentRegistrationOperation(
-      this.reloadAgentSessionInternal(agentId, overrides, options),
+      this.runSessionOwnershipMutation(agentId, () =>
+        this.runForegroundMutation(agentId, () =>
+          this.reloadAgentSessionInternal(agentId, overrides, options),
+        ),
+      ),
     );
   }
 
@@ -1350,10 +1383,13 @@ export class AgentManager {
     options?: { rehydrateFromDisk?: boolean },
   ): Promise<ManagedAgent> {
     this.assertAcceptingAgentRegistrations();
-    let existing = this.requireSessionAgent(agentId);
-    if (this.hasInFlightRun(agentId)) {
-      await this.cancelAgentRunBefore(agentId, "reload");
-      existing = this.requireSessionAgent(agentId);
+    let existing = this.requireAgent(agentId);
+    if (!this.sessionReleaseFences.has(agentId) && this.hasInFlightRun(agentId)) {
+      const cancellation = await this.cancelAgentRunNow(agentId);
+      if (cancellation.status === "refused") {
+        throw new AgentRunCancellationError(agentId, "reload");
+      }
+      existing = this.requireAgent(agentId);
     }
     const rehydrateFromDisk = options?.rehydrateFromDisk ?? false;
     const preservedHistoryPrimed = existing.historyPrimed;
@@ -1372,22 +1408,22 @@ export class AgentManager {
     const launchContext = await this.buildLaunchContext(agentId, client, storedConfig.cwd);
     const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
 
+    // Release is an execution gate. Keep the old managed identity fenced and
+    // recoverable until the provider confirms that its writer has exited.
+    await this.closeReloadedSession(existing.session, agentId);
+    this.cancelRunningProviderSubagents(agentId);
+    const closedExisting = this.prepareAgentForClosure(existing, "agent reloaded");
+    await this.persistSnapshot(closedExisting);
+    this.assertAcceptingAgentRegistrations();
+
     const session = handle
       ? await client.resumeSession(handle, providerLaunchConfig, launchContext)
       : await client.createSession(providerLaunchConfig, launchContext);
-    await this.requireExternalMcpSupport(session, storedConfig);
 
     let handedToRegistration = false;
     try {
       this.assertAcceptingAgentRegistrations();
-
-      this.cancelRunningProviderSubagents(agentId);
-      const closedExisting = this.prepareAgentForClosure(existing, "agent reloaded");
-      try {
-        await this.persistSnapshot(closedExisting);
-      } finally {
-        await this.closeReloadedSession(existing.session, agentId);
-      }
+      await this.requireExternalMcpSupport(session, storedConfig);
 
       if (rehydrateFromDisk) {
         // Wipe the in-memory timeline so registerSession mints a new epoch and
@@ -1420,9 +1456,21 @@ export class AgentManager {
   }
 
   private async closeReloadedSession(session: AgentSession, agentId: string): Promise<void> {
+    let release = this.sessionReleaseFences.get(agentId);
+    if (!release || this.failedSessionReleases.has(agentId)) {
+      this.failedSessionReleases.delete(agentId);
+      release = Promise.resolve().then(() => session.close());
+      this.sessionReleaseFences.set(agentId, release);
+      // A failed close can be explicitly retried, but never authorises resume.
+      void release.catch(() => {
+        if (this.sessionReleaseFences.get(agentId) === release) {
+          this.failedSessionReleases.add(agentId);
+        }
+      });
+    }
     try {
       const result = await this.waitWithTimeout({
-        operation: session.close(),
+        operation: release,
         timeoutMs: this.rescueTimeouts.reloadSessionCloseMs,
         onLateError: (error) => {
           this.logger.warn(
@@ -1433,13 +1481,18 @@ export class AgentManager {
       });
 
       if (result === "timed_out") {
-        this.logger.warn(
-          { agentId, timeoutMs: this.rescueTimeouts.reloadSessionCloseMs },
-          "Timed out closing previous session during refresh",
-        );
+        throw new Error("Previous provider session release is unconfirmed; resume is blocked");
       }
+      this.sessionReleaseFences.delete(agentId);
+      this.failedSessionReleases.delete(agentId);
     } catch (error) {
       this.logger.warn({ err: error, agentId }, "Failed to close previous session during refresh");
+      const agent = this.agents.get(agentId);
+      if (agent) {
+        agent.lastError = "Previous provider session release is unconfirmed; resume is blocked";
+        this.emitState(agent);
+      }
+      throw error;
     }
   }
 
@@ -1479,7 +1532,9 @@ export class AgentManager {
       return existing;
     }
 
-    const close = this.closeAgentRuntime(agentId);
+    const close = this.runSessionOwnershipMutation(agentId, () =>
+      this.runForegroundMutation(agentId, () => this.closeAgentRuntime(agentId)),
+    );
     this.inFlightAgentCloses.set(agentId, close);
     const clearClose = () => {
       if (this.inFlightAgentCloses.get(agentId) === close) {
@@ -1491,6 +1546,9 @@ export class AgentManager {
   }
 
   private async closeAgentRuntime(agentId: string): Promise<void> {
+    // A queued close can follow a reload that released the old writer and then
+    // stopped on shutdown/persistence failure before registering a successor.
+    if (!this.agents.has(agentId)) return;
     const agent = this.requireAgent(agentId);
     this.logger.trace(
       {
@@ -1506,13 +1564,8 @@ export class AgentManager {
     );
     await this.drainSessionEvents(agentId);
     this.cancelRunningProviderSubagents(agentId);
+    await this.closeReloadedSession(agent.session, agentId);
     const closedAgent = this.prepareAgentForClosure(agent, "agent closed");
-    let closeError: unknown;
-    try {
-      await agent.session.close();
-    } catch (error) {
-      closeError = error;
-    }
 
     let persistError: unknown;
     try {
@@ -1530,9 +1583,6 @@ export class AgentManager {
       "agent.manager.close.complete",
     );
 
-    if (closeError !== undefined) {
-      throw closeError;
-    }
     if (persistError !== undefined) {
       throw persistError;
     }
@@ -2023,6 +2073,25 @@ export class AgentManager {
     void tail.finally(() => {
       if (this.lifecycleMutationTails.get(agentId) === tail) {
         this.lifecycleMutationTails.delete(agentId);
+      }
+    });
+    return result;
+  }
+
+  private async runSessionOwnershipMutation<T>(
+    agentId: string,
+    mutation: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.sessionOwnershipTails.get(agentId) ?? Promise.resolve();
+    const result = previous.catch(() => undefined).then(mutation);
+    const tail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.sessionOwnershipTails.set(agentId, tail);
+    void tail.finally(() => {
+      if (this.sessionOwnershipTails.get(agentId) === tail) {
+        this.sessionOwnershipTails.delete(agentId);
       }
     });
     return result;
@@ -2687,7 +2756,7 @@ export class AgentManager {
     requestId: string,
     response: AgentPermissionResponse,
   ): Promise<AgentPermissionResult | void> {
-    const agent = this.requireAgent(agentId);
+    const agent = this.requireSessionAgent(agentId);
     agent.inFlightPermissionResponses.add(requestId);
 
     try {
@@ -4939,6 +5008,9 @@ export class AgentManager {
   }
 
   private requireSessionAgent(id: string): ActiveManagedAgent {
+    if (this.sessionReleaseFences.has(id)) {
+      throw new Error("Provider session release is pending; new execution is blocked");
+    }
     const agent = this.requireAgent(id);
     if (agent.session === null) {
       throw new Error(`Agent '${agent.id}' has no managed session`);

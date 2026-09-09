@@ -585,11 +585,18 @@ test("session close disposes a provider that arrives from an in-flight reconnect
     initialAppServer.child.emit("exit", 17, null);
 
     const turnStart = session.startTurn("continue after reconnect");
+    const turnOutcome = turnStart.catch((error: unknown) => error);
     await reconnectSpawned;
-    await session.close();
+    let closeFinished = false;
+    const close = session.close().then(() => {
+      closeFinished = true;
+    });
+    await Promise.resolve();
+    expect(closeFinished).toBe(false);
     releaseReconnect?.();
 
-    await expect(turnStart).rejects.toThrow("Codex app-server session is closed");
+    await close;
+    expect(await turnOutcome).toMatchObject({ message: "Codex app-server session is closed" });
     await expect(lateExit).resolves.toBeUndefined();
     expect(events.filter((event) => event.event.type === "turn_failed")).toHaveLength(0);
 
