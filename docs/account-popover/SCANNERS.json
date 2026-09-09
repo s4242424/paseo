@@ -1,0 +1,101 @@
+{
+  "classification": "proof_gap",
+  "decision": "carry-forward",
+  "semgrep": {
+    "command": "semgrep scan --config p/typescript --exclude node_modules --exclude .tmp --exclude .worktrees --exclude .git --json --output .tmp/account-semgrep.json packages/app/src/components/context-window-meter.tsx packages/app/src/components/ui/tooltip.tsx packages/app/src/provider-usage packages/app/src/plugins/workspace-panels",
+    "exitCode": 0,
+    "relevantTargets": [
+      "packages/app/src/components/context-window-meter.tsx",
+      "packages/app/src/components/ui/tooltip.tsx",
+      "packages/app/src/plugins/workspace-panels/content.tsx",
+      "packages/app/src/plugins/workspace-panels/locations.test.ts",
+      "packages/app/src/plugins/workspace-panels/locations.ts",
+      "packages/app/src/plugins/workspace-panels/panel.tsx",
+      "packages/app/src/plugins/workspace-panels/resolution.test.ts",
+      "packages/app/src/plugins/workspace-panels/resolution.ts",
+      "packages/app/src/provider-usage/account-controls.tsx",
+      "packages/app/src/provider-usage/accounts.test.ts",
+      "packages/app/src/provider-usage/accounts.ts",
+      "packages/app/src/provider-usage/balance-bar.tsx",
+      "packages/app/src/provider-usage/card.tsx",
+      "packages/app/src/provider-usage/copy.ts",
+      "packages/app/src/provider-usage/format.ts",
+      "packages/app/src/provider-usage/list.tsx",
+      "packages/app/src/provider-usage/settings-section.tsx",
+      "packages/app/src/provider-usage/tone.ts",
+      "packages/app/src/provider-usage/tooltip-providers.test.ts",
+      "packages/app/src/provider-usage/tooltip-providers.ts",
+      "packages/app/src/provider-usage/tooltip-section.tsx",
+      "packages/app/src/provider-usage/types.ts",
+      "packages/app/src/provider-usage/use-provider-accounts.test.tsx",
+      "packages/app/src/provider-usage/use-provider-accounts.ts",
+      "packages/app/src/provider-usage/use-provider-usage.ts",
+      "packages/app/src/provider-usage/window-bar.tsx"
+    ],
+    "findings": 0,
+    "errors": [],
+    "trust": "Supports bounded TypeScript scan only"
+  },
+  "gitleaks": {
+    "commands": [
+      "gitleaks dir packages/app/src --report-format json --report-path .tmp/account-gitleaks.json --no-banner --redact",
+      "gitleaks git . --log-opts=v0.8.0-beta.1..HEAD --report-format json --report-path .tmp/account-gitleaks-branch.json --no-banner --redact"
+    ],
+    "exitCodes": [
+      0,
+      0
+    ],
+    "sourceBytes": 17522815,
+    "findings": [
+      0,
+      0
+    ],
+    "trust": "Source and branch history scan; not whole machine"
+  },
+  "trivy": {
+    "command": "trivy fs --scanners vuln,misconfig --skip-dirs node_modules --skip-dirs .tmp --skip-dirs .git --skip-dirs .worktrees --format json --output .tmp/account-trivy.json .",
+    "exitCode": 0,
+    "trust": "Not a clean pass; findings in unchanged beta baseline files",
+    "targets": [
+      {
+        "path": "package-lock.json",
+        "vulnerabilities": 163,
+        "misconfigurations": 0
+      },
+      {
+        "path": "packages/expo-two-way-audio/examples/basic-usage/package-lock.json",
+        "vulnerabilities": 130,
+        "misconfigurations": 0
+      },
+      {
+        "path": "packages/expo-two-way-audio/examples/flow-api/package-lock.json",
+        "vulnerabilities": 136,
+        "misconfigurations": 0
+      },
+      {
+        "path": "packages/expo-two-way-audio/package-lock.json",
+        "vulnerabilities": 127,
+        "misconfigurations": 0
+      },
+      {
+        "path": "docker/base/Dockerfile",
+        "vulnerabilities": 0,
+        "misconfigurations": 1
+      }
+    ],
+    "severityCounts": {
+      "LOW": 34,
+      "MEDIUM": 176,
+      "HIGH": 335,
+      "CRITICAL": 11
+    },
+    "baselineCheck": "git diff v0.8.0-beta.1 --name-only -- package-lock.json packages/expo-two-way-audio docker/base/Dockerfile returned empty",
+    "exclusions": [
+      "node_modules",
+      ".tmp",
+      ".git",
+      ".worktrees"
+    ],
+    "blocker": "Dependency findings remain; no broad security closure"
+  }
+}
