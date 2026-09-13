@@ -264,7 +264,6 @@ function buildAgentStateSelector(serverId: string, agentId: string) {
       contextWindowUsedTokens: agent?.lastUsage?.contextWindowUsedTokens ?? null,
       totalCostUsd: agent?.lastUsage?.totalCostUsd ?? null,
       model: agent?.model ?? null,
-      provider: agent?.provider ?? null,
     };
   };
 }
@@ -275,7 +274,8 @@ function renderContextWindowMeter(
   totalCostUsd: number | null,
   showPercentage: boolean,
   serverId: string,
-  provider: string | null,
+  workspaceId: string | null | undefined,
+  agentId: string,
   pending: boolean,
   glyphSize: number,
 ): ReactElement | null {
@@ -290,7 +290,8 @@ function renderContextWindowMeter(
       totalCostUsd={totalCostUsd}
       showPercentage={showPercentage}
       serverId={serverId}
-      provider={provider}
+      workspaceId={workspaceId}
+      agentId={agentId}
       pending={pending}
       glyphSize={glyphSize}
     />
@@ -2000,7 +2001,8 @@ function ComposerContentImpl({
         agentState.totalCostUsd,
         false,
         serverId,
-        agentState.provider,
+        workspaceId,
+        agentId,
         contextWindowPending,
         contextWindowMeterGlyphSize,
       ),
@@ -2009,7 +2011,8 @@ function ComposerContentImpl({
       contextWindowUsedTokens,
       agentState.totalCostUsd,
       serverId,
-      agentState.provider,
+      workspaceId,
+      agentId,
       contextWindowPending,
       contextWindowMeterGlyphSize,
     ],

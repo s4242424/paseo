@@ -24,11 +24,20 @@ function fillToneStyle(tone: ProviderUsageTone) {
   }
 }
 
-export function ProviderUsageWindowBar({ window }: { window: ProviderUsageWindow }) {
+export function ProviderUsageWindowBar({
+  window,
+  showRemaining = false,
+}: {
+  window: ProviderUsageWindow;
+  showRemaining?: boolean;
+}) {
   const usedPct = resolveUsedPct(window);
+  const displayedPct = showRemaining
+    ? (window.remainingPct ?? (usedPct != null ? 100 - usedPct : null))
+    : usedPct;
   const tone = window.tone ?? deriveTone(usedPct);
 
-  const fillWidth = clampPct(usedPct ?? 0);
+  const fillWidth = clampPct(displayedPct ?? 0);
   const fillStyle = useMemo<StyleProp<ViewStyle>>(
     () => [styles.fill, fillToneStyle(tone), { width: `${fillWidth}%` }],
     [fillWidth, tone],
@@ -46,7 +55,9 @@ export function ProviderUsageWindowBar({ window }: { window: ProviderUsageWindow
           {window.label}
         </Text>
         <Text style={styles.value}>
-          {usedPct != null ? formatPct(usedPct) : "—"}
+          {displayedPct != null
+            ? `${formatPct(displayedPct)}${showRemaining ? " remaining" : ""}`
+            : "—"}
           {trailing ? (
             <Text style={isAtRisk ? styles.atRisk : styles.reset}>{` · ${trailing}`}</Text>
           ) : null}

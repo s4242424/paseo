@@ -7,6 +7,16 @@ interface ProviderUsageFixturePayload {
   providers: ProviderUsage[];
 }
 
+interface PluginCatalogFixtureEntry {
+  id: string;
+  clientBundle: string;
+  requirements?: { paseo: string };
+}
+
+interface ProviderUsageFixtureOptions {
+  pluginCatalog?: PluginCatalogFixtureEntry[];
+}
+
 export interface ProviderUsageFixture {
   requestCount(): number;
   waitForRequestCount(count: number): Promise<void>;
@@ -38,7 +48,10 @@ function getSessionMessage(message: WebSocketMessage): Record<string, unknown> |
   return maybeEnvelope.message as Record<string, unknown>;
 }
 
-function withProviderUsageFeature(message: WebSocketMessage): string | null {
+function withProviderUsageFeature(
+  message: WebSocketMessage,
+  pluginsEnabled: boolean,
+): string | null {
   const envelope = parseJson(message);
   if (!envelope || typeof envelope !== "object") {
     return null;
@@ -69,6 +82,7 @@ function withProviderUsageFeature(message: WebSocketMessage): string | null {
             ? payload.features
             : {}),
           providerUsageList: true,
+          ...(pluginsEnabled ? { plugins: true } : {}),
         },
       },
     },
@@ -78,6 +92,7 @@ function withProviderUsageFeature(message: WebSocketMessage): string | null {
 export async function installProviderUsageFixture(
   page: Page,
   payloads: ProviderUsageFixturePayload[],
+  options: ProviderUsageFixtureOptions = {},
 ): Promise<ProviderUsageFixture> {
   let requests = 0;
   const waiters: Array<{ count: number; resolve: () => void }> = [];
@@ -129,11 +144,30 @@ export async function installProviderUsageFixture(
         );
         return;
       }
+      if (sessionMessage?.type === "plugin.catalog.get.request" && options.pluginCatalog) {
+        const requestId = sessionMessage.requestId;
+        if (typeof requestId !== "string") {
+          throw new Error("plugin.catalog.get.request missing requestId");
+        }
+        ws.send(
+          JSON.stringify({
+            type: "session",
+            message: {
+              type: "plugin.catalog.get.response",
+              payload: { requestId, plugins: options.pluginCatalog },
+            },
+          }),
+        );
+        return;
+      }
       server.send(message);
     });
 
     server.onMessage((message) => {
-      const serverInfo = typeof message === "string" ? withProviderUsageFeature(message) : null;
+      const serverInfo =
+        typeof message === "string"
+          ? withProviderUsageFeature(message, Boolean(options.pluginCatalog))
+          : null;
       ws.send(serverInfo ?? message);
     });
   });

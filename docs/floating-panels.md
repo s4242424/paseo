@@ -7,15 +7,16 @@ canonical files and are trying to add or change one.
 
 ## Canonical files
 
-| File                                     | Use case                                                          |
-| ---------------------------------------- | ----------------------------------------------------------------- |
-| `components/ui/combobox.tsx`             | Anchored picker with search; mobile falls back to bottom sheet    |
-| `components/ui/tooltip.tsx`              | Non-interactive hover/long-press tooltip                          |
-| `components/workspace-hover-card.tsx`    | Desktop-web hover card with measure + computePosition + Portal    |
-| `components/ui/autocomplete-popover.tsx` | Slash-command autocomplete anchored to the focused composer input |
+| File                                     | Use case                                                            |
+| ---------------------------------------- | ------------------------------------------------------------------- |
+| `components/ui/combobox.tsx`             | Anchored picker with search; mobile falls back to bottom sheet      |
+| `components/ui/tooltip.tsx`              | Hover/long-press tooltip; interactive mode uses the hover safe zone |
+| `components/workspace-hover-card.tsx`    | Desktop-web hover card with measure + computePosition + Portal      |
+| `components/ui/autocomplete-popover.tsx` | Slash-command autocomplete anchored to the focused composer input   |
 
 Each handles a different mix of concerns: combobox owns input focus, tooltip is
-non-interactive, hover-card is web-only desktop, autocomplete keeps the composer
+passive by default and uses its interactive mode only with a hover safe zone,
+hover-card is web-only desktop, autocomplete keeps the composer
 input focused while its scrollable list lives in a Portal. There is no shared
 "floating panel" primitive yet — when a fifth use case shows up we can revisit;
 until then prefer copying the closest file and trimming.
