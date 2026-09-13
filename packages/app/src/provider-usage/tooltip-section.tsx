@@ -9,6 +9,7 @@ import { ProviderUsageCard } from "./card";
 import { canOpenAccountPanel, resolveAccountPanelTarget } from "./account-panel";
 import { providerUsageCopy } from "./copy";
 import type { ProviderUsage, ProviderUsageView } from "./types";
+import { useProviderAccountLabels } from "./use-provider-usage";
 
 const COMBINED_PROVIDER_IDS = new Set(["claude", "codex"]);
 
@@ -21,15 +22,22 @@ export function ProviderUsageTooltipSection({
   serverId,
   workspaceId,
   agentId,
+  isPopoverOpen,
 }: {
   view: ProviderUsageView;
   serverId: string | null | undefined;
   workspaceId: string | null | undefined;
   agentId: string | null | undefined;
+  isPopoverOpen: boolean;
 }) {
   const plugins = useInstalledPlugins();
   const isConnected = useHostRuntimeIsConnected(serverId ?? "");
   const accountPanel = resolveAccountPanelTarget(plugins, serverId);
+  const accountLabels = useProviderAccountLabels(
+    serverId,
+    accountPanel?.pluginId ?? null,
+    isPopoverOpen,
+  );
   const accountPanelAvailable = canOpenAccountPanel({
     accountPanel,
     isConnected,
@@ -104,7 +112,13 @@ export function ProviderUsageTooltipSection({
       <View style={styles.divider} />
       <View style={styles.usages}>
         {usages.map((usage) => (
-          <ProviderUsageCard key={usage.providerId} usage={usage} compact showRemaining />
+          <ProviderUsageCard
+            key={usage.providerId}
+            usage={usage}
+            compact
+            showRemaining
+            accountLabel={accountLabels[usage.providerId.toLowerCase() as "claude" | "codex"]}
+          />
         ))}
       </View>
       {accountAction}

@@ -15,6 +15,7 @@ interface PluginCatalogFixtureEntry {
 
 interface ProviderUsageFixtureOptions {
   pluginCatalog?: PluginCatalogFixtureEntry[];
+  accountLabels?: { claude: string | null; codex: string | null };
 }
 
 export interface ProviderUsageFixture {
@@ -159,6 +160,37 @@ export async function installProviderUsageFixture(
           }),
         );
         return;
+      }
+      if (sessionMessage?.type === "plugin.rpc.invoke.request" && options.pluginCatalog) {
+        const requestId = sessionMessage.requestId;
+        if (typeof requestId !== "string") {
+          throw new Error("plugin.rpc.invoke.request missing requestId");
+        }
+        const method = sessionMessage.method;
+        let output: { state: string; email: string | null } | null = null;
+        if (method === "account.status") {
+          output = {
+            state: "oauth",
+            email: options.accountLabels?.claude ?? "claude@example.test",
+          };
+        } else if (method === "codex.account.status") {
+          output = {
+            state: "chatgpt",
+            email: options.accountLabels?.codex ?? "codex@example.test",
+          };
+        }
+        if (output) {
+          ws.send(
+            JSON.stringify({
+              type: "session",
+              message: {
+                type: "plugin.rpc.invoke.response",
+                payload: { requestId, output },
+              },
+            }),
+          );
+          return;
+        }
       }
       server.send(message);
     });

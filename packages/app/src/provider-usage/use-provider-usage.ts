@@ -1,5 +1,6 @@
 import { useCallback, useMemo } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { z } from "zod";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { useHostRuntimeClient, useHostRuntimeIsConnected } from "@/runtime/host-runtime";
 import { useSessionStore } from "@/stores/session-store";
@@ -9,13 +10,54 @@ import type { ProviderUsageListPayload, ProviderUsageView } from "./types";
 export const PROVIDER_USAGE_STALE_TIME_MS = 5 * 60 * 1000;
 
 type ProviderUsageClient = Pick<DaemonClient, "listProviderUsage">;
+type ProviderAccountClient = Pick<DaemonClient, "invokePluginRpc">;
+
+const claudeAccountSchema = z.object({
+  state: z.enum(["oauth", "other", "signed-out", "unknown"]),
+  email: z.string().nullable(),
+});
+const codexAccountSchema = z.object({
+  state: z.enum(["chatgpt", "signed-out", "other", "unavailable"]),
+  email: z.string().nullable(),
+});
+
+export type ProviderAccountLabel = "Checking account…" | "Account unknown" | string;
+
+function accountLabel(input: { state: string; email: string | null }): ProviderAccountLabel {
+  return input.email?.trim() || (input.state === "signed-out" ? "Signed out" : "Account unknown");
+}
 
 export function providerUsageQueryKey(serverId: string | null | undefined) {
   return ["providerUsage", serverId ?? ""] as const;
 }
 
+export function providerAccountQueryKey(
+  serverId: string | null | undefined,
+  pluginId: string | null,
+) {
+  return ["providerAccount", serverId ?? "", pluginId ?? ""] as const;
+}
+
 async function fetchProviderUsage(client: ProviderUsageClient): Promise<ProviderUsageListPayload> {
   return client.listProviderUsage();
+}
+
+async function fetchProviderAccounts(
+  client: ProviderAccountClient,
+  pluginId: string,
+): Promise<Record<"claude" | "codex", ProviderAccountLabel>> {
+  const [claude, codex] = await Promise.allSettled([
+    client.invokePluginRpc(pluginId, "account.status", {}),
+    client.invokePluginRpc(pluginId, "codex.account.status", {}),
+  ]);
+  const claudeResult =
+    claude.status === "fulfilled" ? claudeAccountSchema.safeParse(claude.value) : null;
+  const codexResult =
+    codex.status === "fulfilled" ? codexAccountSchema.safeParse(codex.value) : null;
+  return {
+    claude: claudeResult?.success ? accountLabel(claudeResult.data) : "Account unknown",
+    codex: codexResult?.success ? accountLabel(codexResult.data) : "Account unknown",
+  };
 }
 
 interface UseProviderUsageOptions {
@@ -100,4 +142,30 @@ export function useProviderUsage(
   ]);
 
   return { view, refresh, canFetch };
+}
+
+// Account identity is deliberately read from the selected host's account plugin.
+// Usage payloads contain plan and quota information only, never an account identity.
+export function useProviderAccountLabels(
+  serverId: string | null | undefined,
+  pluginId: string | null,
+  isPopoverOpen: boolean,
+): Record<"claude" | "codex", ProviderAccountLabel> {
+  const client = useHostRuntimeClient(serverId ?? "");
+  const isConnected = useHostRuntimeIsConnected(serverId ?? "");
+  const queryKey = useMemo(() => providerAccountQueryKey(serverId, pluginId), [pluginId, serverId]);
+  const enabled = Boolean(client && isConnected && pluginId && isPopoverOpen);
+  const query = useQuery({
+    queryKey,
+    queryFn: () => fetchProviderAccounts(client as ProviderAccountClient, pluginId as string),
+    enabled,
+    // Identity is reread when the popover opens. It never confirms a switch.
+    staleTime: 0,
+    refetchOnMount: "always",
+    refetchOnReconnect: false,
+    refetchOnWindowFocus: false,
+  });
+  if (!enabled || query.isError) return { claude: "Account unknown", codex: "Account unknown" };
+  if (!query.data) return { claude: "Checking account…", codex: "Checking account…" };
+  return query.data;
 }

@@ -240,6 +240,7 @@ export function ContextWindowMeter({
             serverId={serverId}
             workspaceId={workspaceId}
             agentId={agentId}
+            isPopoverOpen={isTooltipOpen}
           />
         </View>
       </TooltipContent>

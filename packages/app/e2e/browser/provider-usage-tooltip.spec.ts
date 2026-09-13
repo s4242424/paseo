@@ -37,7 +37,9 @@ async function openMockAgent(page: Page, viewport = MOBILE_VIEWPORT) {
   });
   await openAgentRoute(page, session);
   await expectComposerVisible(page);
-  await expect(page.getByTestId("context-window-meter")).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId("context-window-meter")).toBeVisible({
+    timeout: 30_000,
+  });
   return session;
 }
 
@@ -63,7 +65,12 @@ test.describe("provider usage tooltip", () => {
                   remainingPct: 75,
                   resetsAt: "2026-06-19T05:00:00.000Z",
                 },
-                { id: "weekly", label: "Weekly", usedPct: 69, remainingPct: 31 },
+                {
+                  id: "weekly",
+                  label: "Weekly",
+                  usedPct: 69,
+                  remainingPct: 31,
+                },
                 {
                   id: "weekly-fable",
                   label: "Weekly · Fable",
@@ -71,13 +78,29 @@ test.describe("provider usage tooltip", () => {
                   remainingPct: 18,
                 },
               ],
+              balances: [
+                {
+                  id: "extra-usage",
+                  label: "Extra usage",
+                  remaining: 0,
+                  unit: "usd",
+                },
+              ],
+              details: [{ id: "extra-usage", label: "Extra usage", value: "Disabled" }],
             },
             {
               providerId: "codex",
               displayName: "Codex",
               status: "available",
               planLabel: null,
-              windows: [{ id: "session", label: "Session", usedPct: 52, remainingPct: 48 }],
+              windows: [
+                {
+                  id: "session",
+                  label: "Session",
+                  usedPct: 52,
+                  remainingPct: 48,
+                },
+              ],
             },
             {
               providerId: "copilot",
@@ -102,9 +125,12 @@ test.describe("provider usage tooltip", () => {
         timeout: 10_000,
       });
       await expect(page.getByText("Codex", { exact: true })).toBeVisible();
+      await expect(page.getByText("claude@example.test", { exact: true })).toBeVisible();
+      await expect(page.getByText("codex@example.test", { exact: true })).toBeVisible();
       await expect(page.getByText("Session", { exact: true })).toHaveCount(2);
       await expect(page.getByText("75% remaining", { exact: false })).toBeVisible();
       await expect(page.getByText("Copilot", { exact: true })).toHaveCount(0);
+      await expect(page.getByText("Extra usage", { exact: true })).toHaveCount(0);
       const popover = page.getByTestId("context-window-meter-popover");
       await expect(popover).toBeVisible();
       const popoverBox = await popover.boundingBox();
