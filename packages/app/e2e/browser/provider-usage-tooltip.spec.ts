@@ -151,6 +151,59 @@ test.describe("provider usage tooltip", () => {
     }
   });
 
+  test("keeps compact provider status and rejects unverified account labels", async ({ page }) => {
+    test.setTimeout(180_000);
+    const usageFixture = await installProviderUsageFixture(
+      page,
+      [
+        {
+          fetchedAt: "2026-06-19T00:00:00.000Z",
+          providers: [
+            {
+              providerId: "claude",
+              displayName: "Claude",
+              status: "unavailable",
+              planLabel: "Max 20x",
+              windows: [],
+            },
+            {
+              providerId: "codex",
+              displayName: "Codex",
+              status: "error",
+              planLabel: "Pro",
+              error: "Codex authentication failed",
+              windows: [],
+            },
+          ],
+        },
+      ],
+      {
+        pluginCatalog: ACCOUNT_PLUGIN_CATALOG,
+        accountStatuses: {
+          claude: { state: "signed-out", email: "stray-claude@example.test" },
+          codex: { state: "other", email: "stray-codex@example.test" },
+        },
+      },
+    );
+    const session = await openMockAgent(page);
+    try {
+      await page.getByTestId("context-window-meter").click();
+      await usageFixture.waitForRequestCount(1);
+
+      await expect(page.getByText("Signed out", { exact: true })).toBeVisible({ timeout: 10_000 });
+      await expect(page.getByText("Account unknown", { exact: true })).toBeVisible();
+      await expect(page.getByText("Unavailable", { exact: true })).toBeVisible();
+      await expect(page.getByText("Error", { exact: true })).toBeVisible();
+      await expect(page.getByText("Codex authentication failed", { exact: true })).toBeVisible();
+      await expect(page.getByText("stray-claude@example.test", { exact: true })).toHaveCount(0);
+      await expect(page.getByText("stray-codex@example.test", { exact: true })).toHaveCount(0);
+      await expect(page.getByText("Max 20x", { exact: true })).toHaveCount(0);
+      await expect(page.getByText("Pro", { exact: true })).toHaveCount(0);
+    } finally {
+      await session.cleanup();
+    }
+  });
+
   test("refreshes usage again each time the tooltip is shown", async ({ page }) => {
     test.setTimeout(180_000);
     const usageFixture = await installProviderUsageFixture(

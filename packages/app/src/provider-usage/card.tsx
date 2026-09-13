@@ -105,6 +105,13 @@ export function ProviderUsageCard({
         {headerMeta}
       </View>
 
+      {compact && status ? (
+        <View style={styles.compactStatusRow}>
+          <View style={dotStyle} />
+          <Text style={styles.statusLabel}>{status}</Text>
+        </View>
+      ) : null}
+
       {usage.error ? (
         <Text style={styles.error} numberOfLines={3}>
           {usage.error}
@@ -198,6 +205,11 @@ const styles = StyleSheet.create((theme) => ({
     color: theme.colors.foregroundMuted,
     fontSize: theme.fontSize.sm,
     textAlign: "right",
+  },
+  compactStatusRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[1.5],
   },
   bars: {
     gap: theme.spacing[3],

@@ -23,8 +23,14 @@ const codexAccountSchema = z.object({
 
 export type ProviderAccountLabel = "Checking account…" | "Account unknown" | string;
 
-function accountLabel(input: { state: string; email: string | null }): ProviderAccountLabel {
-  return input.email?.trim() || (input.state === "signed-out" ? "Signed out" : "Account unknown");
+function accountLabel(
+  input: { state: string; email: string | null },
+  verifiedState: "oauth" | "chatgpt",
+): ProviderAccountLabel {
+  if (input.state === "signed-out") return "Signed out";
+  if (input.state !== verifiedState) return "Account unknown";
+  const email = z.email().safeParse(input.email?.trim());
+  return email.success ? email.data : "Account unknown";
 }
 
 export function providerUsageQueryKey(serverId: string | null | undefined) {
@@ -55,8 +61,8 @@ async function fetchProviderAccounts(
   const codexResult =
     codex.status === "fulfilled" ? codexAccountSchema.safeParse(codex.value) : null;
   return {
-    claude: claudeResult?.success ? accountLabel(claudeResult.data) : "Account unknown",
-    codex: codexResult?.success ? accountLabel(codexResult.data) : "Account unknown",
+    claude: claudeResult?.success ? accountLabel(claudeResult.data, "oauth") : "Account unknown",
+    codex: codexResult?.success ? accountLabel(codexResult.data, "chatgpt") : "Account unknown",
   };
 }
 
@@ -166,6 +172,8 @@ export function useProviderAccountLabels(
     refetchOnWindowFocus: false,
   });
   if (!enabled || query.isError) return { claude: "Account unknown", codex: "Account unknown" };
-  if (!query.data) return { claude: "Checking account…", codex: "Checking account…" };
+  if (query.isFetching || !query.data) {
+    return { claude: "Checking account…", codex: "Checking account…" };
+  }
   return query.data;
 }

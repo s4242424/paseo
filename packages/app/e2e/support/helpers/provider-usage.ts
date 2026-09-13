@@ -16,6 +16,10 @@ interface PluginCatalogFixtureEntry {
 interface ProviderUsageFixtureOptions {
   pluginCatalog?: PluginCatalogFixtureEntry[];
   accountLabels?: { claude: string | null; codex: string | null };
+  accountStatuses?: {
+    claude: { state: string; email: string | null };
+    codex: { state: string; email: string | null };
+  };
 }
 
 export interface ProviderUsageFixture {
@@ -90,6 +94,53 @@ function withProviderUsageFeature(
   });
 }
 
+function providerAccountOutput(
+  method: unknown,
+  options: ProviderUsageFixtureOptions,
+): { state: string; email: string | null } | null {
+  if (method === "account.status") {
+    return (
+      options.accountStatuses?.claude ?? {
+        state: "oauth",
+        email: options.accountLabels?.claude ?? "claude@example.test",
+      }
+    );
+  }
+  if (method === "codex.account.status") {
+    return (
+      options.accountStatuses?.codex ?? {
+        state: "chatgpt",
+        email: options.accountLabels?.codex ?? "codex@example.test",
+      }
+    );
+  }
+  return null;
+}
+
+function respondToProviderAccountRpc(
+  sessionMessage: Record<string, unknown> | null,
+  options: ProviderUsageFixtureOptions,
+  send: (message: string) => void,
+): boolean {
+  if (sessionMessage?.type !== "plugin.rpc.invoke.request" || !options.pluginCatalog) return false;
+  const requestId = sessionMessage.requestId;
+  if (typeof requestId !== "string") {
+    throw new Error("plugin.rpc.invoke.request missing requestId");
+  }
+  const output = providerAccountOutput(sessionMessage.method, options);
+  if (!output) return false;
+  send(
+    JSON.stringify({
+      type: "session",
+      message: {
+        type: "plugin.rpc.invoke.response",
+        payload: { requestId, output },
+      },
+    }),
+  );
+  return true;
+}
+
 export async function installProviderUsageFixture(
   page: Page,
   payloads: ProviderUsageFixturePayload[],
@@ -161,37 +212,7 @@ export async function installProviderUsageFixture(
         );
         return;
       }
-      if (sessionMessage?.type === "plugin.rpc.invoke.request" && options.pluginCatalog) {
-        const requestId = sessionMessage.requestId;
-        if (typeof requestId !== "string") {
-          throw new Error("plugin.rpc.invoke.request missing requestId");
-        }
-        const method = sessionMessage.method;
-        let output: { state: string; email: string | null } | null = null;
-        if (method === "account.status") {
-          output = {
-            state: "oauth",
-            email: options.accountLabels?.claude ?? "claude@example.test",
-          };
-        } else if (method === "codex.account.status") {
-          output = {
-            state: "chatgpt",
-            email: options.accountLabels?.codex ?? "codex@example.test",
-          };
-        }
-        if (output) {
-          ws.send(
-            JSON.stringify({
-              type: "session",
-              message: {
-                type: "plugin.rpc.invoke.response",
-                payload: { requestId, output },
-              },
-            }),
-          );
-          return;
-        }
-      }
+      if (respondToProviderAccountRpc(sessionMessage, options, ws.send.bind(ws))) return;
       server.send(message);
     });
 
