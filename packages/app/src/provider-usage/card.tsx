@@ -56,7 +56,11 @@ export function ProviderUsageCard({
 }) {
   const status = statusText(usage);
   const footer = footerText(usage);
-  const balances = (usage.balances ?? []).filter((balance) => !compact || !isExtraUsage(balance));
+  const balances = (usage.balances ?? []).filter(
+    (balance) =>
+      !compact ||
+      (!isExtraUsage(balance) && !(usage.providerId === "codex" && balance.id === "credits")),
+  );
   const details = (usage.details ?? []).filter((detail) => !compact || !isExtraUsage(detail));
 
   const containerStyle = useMemo(
