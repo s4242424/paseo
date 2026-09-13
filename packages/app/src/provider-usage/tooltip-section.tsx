@@ -65,11 +65,12 @@ export function ProviderUsageTooltipSection({
         accessibilityLabel="Switch account"
         disabled={!accountPanelAvailable}
         onPress={openAccountPanel}
-        size="sm"
+        size="xs"
+        style={styles.accountAction}
         testID="provider-usage-switch-account"
         variant="outline"
       >
-        Switch account
+        Switch
       </Button>
       {!accountPanelAvailable ? (
         <Text style={styles.detail}>Account switching is unavailable on this host.</Text>
@@ -127,6 +128,9 @@ export function ProviderUsageTooltipSection({
 }
 
 const styles = StyleSheet.create((theme) => ({
+  accountAction: {
+    alignSelf: "flex-end",
+  },
   divider: {
     height: 1,
     // Same token the popover draws its own outline with, so the rule reads as the
