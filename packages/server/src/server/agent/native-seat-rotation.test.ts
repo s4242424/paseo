@@ -44,6 +44,7 @@ async function fixture(options?: {
       sessionId: "old-provider-session",
       repoPath: realRepoPath,
       sourceRevision: revision,
+      timelineRevision: 0,
       dirtyDisposition: "clean",
       nextAction: "continue",
     }),
@@ -71,9 +72,13 @@ async function fixture(options?: {
       calls.push("admit");
     },
     setNativeSeatRotationAdmissionLookup() {},
+    async getTimelineRows() {
+      return [];
+    },
     endNativeSeatRotationAdmission() {
       calls.push("release");
     },
+    notifyAgentState() {},
     async createAgent() {
       calls.push("create");
       if (options?.holdCreate) await waitForCreate;

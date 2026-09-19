@@ -15,6 +15,8 @@ const CheckpointSchema = z.object({
   sessionId: z.string().min(1),
   repoPath: z.string().min(1),
   sourceRevision: z.string().regex(/^[a-f0-9]{7,64}$/i),
+  /** Last committed predecessor timeline sequence when this checkpoint was made. */
+  timelineRevision: z.number().int().nonnegative(),
   dirtyDisposition: z.literal("clean"),
   nextAction: z.string().min(1),
 });
@@ -267,6 +269,9 @@ export class NativeSeatRotationService {
         latest &&
         !["resume_uncertain", "cancelled", "cancelled_after_fence"].includes(latest.state)
       ) {
+        if (["requested", "admitted", "prepared"].includes(latest.state)) {
+          await this.releaseFailedPreparation(latest);
+        }
         await this.write({ ...latest, state: "blocked", error: errorMessage(error) });
       }
       throw error;
@@ -386,6 +391,10 @@ export class NativeSeatRotationService {
         if (await this.isCancelledFor(journal.operationId, journal.predecessorId)) return;
         if (completed) {
           await this.write({ ...latest, state: "resumed", error: undefined });
+          // The provider's final idle event is emitted before the receipt is
+          // durable. Re-emit the normal successor state after the receipt so a
+          // connected client can inspect the terminal operation without polling.
+          if (latest.successorId) this.options.agentManager.notifyAgentState(latest.successorId);
           return;
         }
         await this.write({
@@ -423,6 +432,21 @@ export class NativeSeatRotationService {
       journal.operationId,
     );
     return { accepted: false, operation: await this.write({ ...journal, state: "cancelled" }) };
+  }
+
+  /** A pre-fence failure leaves the predecessor usable rather than stranded. */
+  private async releaseFailedPreparation(journal: NativeSeatRotationJournal): Promise<void> {
+    if (journal.successorId) {
+      try {
+        await this.options.agentManager.closeAgent(journal.successorId);
+      } catch {
+        // The retained successor ID lets repair reconcile a close failure.
+      }
+    }
+    this.options.agentManager.endNativeSeatRotationAdmission(
+      journal.predecessorId,
+      journal.operationId,
+    );
   }
 
   private async stopAfterFence(
@@ -477,6 +501,11 @@ export class NativeSeatRotationService {
       checkpoint.repoPath !== repoPath
     ) {
       throw new Error("checkpoint provenance does not match predecessor identity");
+    }
+    const timelineRows = await this.options.agentManager.getTimelineRows(predecessor.id);
+    const timelineRevision = timelineRows.at(-1)?.seq ?? 0;
+    if (checkpoint.timelineRevision !== timelineRevision) {
+      throw new Error("checkpoint conversation boundary no longer matches the predecessor");
     }
     const snapshot = await readCleanGitSnapshot(repoPath, checkpointPath);
     if (snapshot.sourceRevision !== checkpoint.sourceRevision) {
@@ -551,7 +580,11 @@ export class NativeSeatRotationService {
         const journal = JSON.parse(
           readFileSync(this.operationPath(owner.operationId), "utf8"),
         ) as NativeSeatRotationJournal;
-        if (journal.predecessorId !== agentId || journal.state === "cancelled") continue;
+        // A preparation failure before archive has released the predecessor.
+        // Its generation lock remains as an idempotency receipt, but cannot
+        // continue to deny ordinary writes to a still-live old session.
+        if (journal.predecessorId !== agentId || ["cancelled", "blocked"].includes(journal.state))
+          continue;
         return { operationId: owner.operationId, generation };
       } catch {
         // A torn/missing receipt is a fence, never permission to write.
