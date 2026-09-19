@@ -358,6 +358,15 @@ export interface SendMessageOptions {
   attachments?: SendAgentMessageRequest["attachments"];
 }
 
+export interface NativeSeatRotationRequest {
+  operationId: string;
+  predecessorId: string;
+  generation: number;
+  handoverRoot: string;
+  checkpointPath: string;
+  resumePrompt: string;
+}
+
 export interface AgentAttentionRequiredNotification {
   agentId: string;
   reason: "finished" | "error" | "permission";
@@ -2653,6 +2662,79 @@ export class DaemonClient {
       },
     });
     return { archivedAt: result.archivedAt };
+  }
+
+  async rotateAgentSeat(input: NativeSeatRotationRequest): Promise<{
+    accepted: boolean;
+    state: string | null;
+    successorId: string | null;
+  }> {
+    // COMPAT(nativeSeatRotation): added in v0.8.0; no legacy lifecycle fallback is safe.
+    if (this.lastServerInfoMessage?.features?.nativeSeatRotation !== true) {
+      throw new Error("Update the host to use native seat rotation.");
+    }
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"agent.seat_rotation.response">({
+        message: {
+          type: "agent.seat_rotation.request",
+          ...input,
+        },
+      });
+    if (!payload.accepted) throw new Error(payload.error ?? "Native seat rotation was rejected.");
+    return {
+      accepted: payload.accepted,
+      state: payload.state,
+      successorId: payload.successorId,
+    };
+  }
+
+  async cancelAgentSeatRotation(operationId: string): Promise<{
+    accepted: boolean;
+    state: string | null;
+    successorId: string | null;
+  }> {
+    if (this.lastServerInfoMessage?.features?.nativeSeatRotation !== true) {
+      throw new Error("Update the host to use native seat rotation.");
+    }
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"agent.seat_rotation.cancel.response">({
+        message: { type: "agent.seat_rotation.cancel.request", operationId },
+      });
+    if (!payload.accepted)
+      throw new Error(payload.error ?? "Native seat rotation cancellation failed.");
+    return {
+      accepted: payload.accepted,
+      state: payload.state,
+      successorId: payload.successorId,
+    };
+  }
+
+  async inspectAgentSeatRotation(operationId: string): Promise<{
+    operationId: string;
+    phase: "pending" | "succeeded" | "failed" | null;
+    successorId: string | null;
+    workspaceId: string | null;
+    sourceRevision: string | null;
+    revision: number | null;
+    failureCode: string | null;
+  }> {
+    if (this.lastServerInfoMessage?.features?.nativeSeatRotation !== true) {
+      throw new Error("Update the host to inspect native seat rotation.");
+    }
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"agent.seat_rotation.inspect.response">({
+        message: { type: "agent.seat_rotation.inspect.request", operationId },
+      });
+    if (payload.error) throw new Error(payload.error);
+    return {
+      operationId: payload.operationId,
+      phase: payload.phase,
+      successorId: payload.successorId,
+      workspaceId: payload.workspaceId,
+      sourceRevision: payload.sourceRevision,
+      revision: payload.revision,
+      failureCode: payload.failureCode,
+    };
   }
 
   async detachAgent(agentId: string): Promise<void> {

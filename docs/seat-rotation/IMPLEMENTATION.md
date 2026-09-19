@@ -1,8 +1,23 @@
 # Seat rotation transition core
 
-This is a bounded fixture-proof core under `scripts/seat-rotation/`. It has no
-daemon entrypoint, watcher, plugin, UI, provider hook, policy change or live
-lifecycle call. The controller owns the adapter and any live proof.
+The reference core under `scripts/seat-rotation/` remains fixture proof. The
+daemon-owned operation is `packages/server/src/server/agent/native-seat-rotation.ts`.
+It has no watcher, schedule or automatic threshold policy.
+
+## Client continuity
+
+The feature-gated client API is `DaemonClient.rotateAgentSeat`,
+`cancelAgentSeatRotation`, and `inspectAgentSeatRotation`. Persist the operation
+ID before asking for a rotation. On reconnect, call `inspectAgentSeatRotation`
+with that ID even when the predecessor is archived or no longer visible.
+
+Inspect returns a monotonic receipt `revision`, `phase`, `successorId`,
+`workspaceId`, `sourceRevision`, and safe `failureCode`. A `succeeded` phase
+means the successor is durable and can replace the predecessor tab; the app
+must wait for its normal agent snapshot before retargeting. `pending` and
+`failed` keep the predecessor target. The daemon, not the app, archives the
+predecessor. No labels, archive calls, checkpoint contents or provider session
+identifiers are client inputs to this continuity path.
 
 ## Contract
 
@@ -29,12 +44,13 @@ path and source revision must match the request. It carries only an opaque next
 action string; command and shell checkpoint fields are refused and nothing from
 the checkpoint is executed.
 
-Operations use a durable real-filesystem JSON journal plus per-operation mkdir
-lock. The temporary file is fsynced before rename and the containing directory
-is fsynced after rename. Create, readiness, fence, activation and archive
-uncertainty retain recoverable journal state. Cancellation is accepted only
-before fencing. Reconcile capacity exhaustion blocks before another attempt or
-predecessor retirement.
+Operations use a durable real-filesystem JSON journal plus a per-predecessor
+generation mkdir admission lock. The temporary file is fsynced before rename
+and the containing directory is fsynced after rename. A second operation ID
+for the same predecessor generation is refused. Create, readiness, fence,
+activation and archive uncertainty retain recoverable journal state. Stop is a
+durable latch: after fencing it interrupts or closes the successor and retains
+a recoverable idle state rather than silently continuing.
 
 Usage samples must be finite, fresh, session-matching occupancy values. The
 strict condition is `used / limit > 0.4`; exactly 40% does not latch. Latches

@@ -11,7 +11,7 @@ import { SeatRotationCore, UsageLatchStore } from "./core.mjs";
 async function fixture({ adapterPatch = {}, checkpointPatch = {} } = {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "seat-rotation-")));
   const repoPath = path.join(root, "repo");
-  const handoverRoot = path.join(root, "handover");
+  const handoverRoot = path.join(repoPath, ".handover");
   await fs.mkdir(repoPath);
   await fs.mkdir(handoverRoot);
   const operationId = "rotate-001";
@@ -22,6 +22,7 @@ async function fixture({ adapterPatch = {}, checkpointPatch = {} } = {}) {
     sessionId: "old-session",
     repoPath,
     sourceRevision: "8f0f65c9058585d0c58d98f1db240b5fe48af8db",
+    dirtyDisposition: "clean",
     nextAction: "continue the bounded task",
     ...checkpointPatch,
   };
@@ -35,6 +36,7 @@ async function fixture({ adapterPatch = {}, checkpointPatch = {} } = {}) {
     sessionId: "old-session",
     repoPath,
     sourceRevision: "8f0f65c9058585d0c58d98f1db240b5fe48af8db",
+    dirtyDisposition: "clean",
     runtime: { provider: "fable", model: "fable-1", effort: "medium", mode: "auto", cwd: repoPath },
   };
   const calls = [];
@@ -59,6 +61,14 @@ async function fixture({ adapterPatch = {}, checkpointPatch = {} } = {}) {
     async createPreparedSuccessor() {
       calls.push("create");
       return { successorId: "new-session" };
+    },
+    async readSourceSnapshot({ repoPath: receivedRepoPath }) {
+      calls.push("source");
+      return {
+        repoPath: receivedRepoPath,
+        sourceRevision: contract.sourceRevision,
+        dirtyDisposition: "clean",
+      };
     },
     async readSuccessorReadiness({ contract: received }) {
       calls.push("ready");
@@ -133,7 +143,15 @@ test("valid checkpoint transfers exactly once with a prepared successor", async 
   ]);
   assert.equal(first.operation.state, "completed");
   assert.equal(replay.replay, true);
-  assert.deepEqual(f.calls, ["preflight", "create", "ready", "fence", "archive", "activate"]);
+  assert.deepEqual(f.calls, [
+    "preflight",
+    "source",
+    "create",
+    "ready",
+    "fence",
+    "archive",
+    "activate",
+  ]);
 });
 
 test("missing, tampered, wrong-repo and symlink checkpoints do not create successors", async (t) => {
@@ -225,6 +243,47 @@ test("concurrent and duplicate triggers cannot duplicate the effect", async (t) 
   assert.equal(f.calls.filter((call) => call === "create").length, 1);
 });
 
+test("a different request cannot acquire the same predecessor generation", async (t) => {
+  let releaseCreate;
+  const waiting = new Promise((resolve) => {
+    releaseCreate = resolve;
+  });
+  const f = await fixture({
+    adapterPatch: {
+      async createPreparedSuccessor() {
+        f.calls.push("create");
+        await waiting;
+        return { successorId: "new-session" };
+      },
+    },
+  });
+  t.after(() => fs.rm(f.root, { recursive: true, force: true }));
+  const first = f.core.run(request(f));
+  while (!f.calls.includes("create")) await new Promise((resolve) => setImmediate(resolve));
+  const secondCheckpoint = {
+    operationId: "rotate-002",
+    generation: 1,
+    sessionId: "old-session",
+    repoPath: f.repoPath,
+    sourceRevision: f.contract.sourceRevision,
+    dirtyDisposition: "clean",
+    nextAction: "continue the bounded task",
+  };
+  await fs.writeFile(f.checkpointPath, JSON.stringify(secondCheckpoint));
+  const secondContract = {
+    ...f.contract,
+    checkpointHash: createHash("sha256")
+      .update(await fs.readFile(f.checkpointPath))
+      .digest("hex"),
+  };
+  assert.equal(
+    (await f.core.run({ ...request(f), operationId: "rotate-002", contract: secondContract })).code,
+    "predecessor_generation_locked",
+  );
+  releaseCreate();
+  assert.equal((await first).ok, true);
+});
+
 test("create timeout and post-create interruption retain a reconcile-only journal", async (t) => {
   const timedOut = await fixture({
     adapterPatch: {
@@ -307,6 +366,48 @@ test("cancellation stops a pre-fence uncertain operation and reconcile budget bl
   assert.equal((await b.core.reconcile(b.operationId)).code, "reconciliation_required");
   assert.equal((await b.core.reconcile(b.operationId)).code, "reconcile_budget_exhausted");
   assert.equal((await b.core.read(b.operationId)).state, "blocked");
+});
+
+test("cancellation after fencing stops the successor and retains a recoverable state", async (t) => {
+  const f = await fixture({
+    adapterPatch: {
+      async archivePredecessor() {
+        throw new Error("archive acknowledgement lost");
+      },
+      async stopSuccessor() {
+        f.calls.push("stop-successor");
+        return { stopped: true };
+      },
+    },
+  });
+  t.after(() => fs.rm(f.root, { recursive: true, force: true }));
+  assert.equal((await f.core.run(request(f))).code, "archive_uncertain");
+  assert.equal((await f.core.cancel(f.operationId)).ok, true);
+  assert.equal((await f.core.read(f.operationId)).state, "cancelled_after_fence");
+  assert.ok(f.calls.includes("stop-successor"));
+});
+
+test("dirty worktree checkpoints are refused before any adapter call", async (t) => {
+  const f = await fixture({ checkpointPatch: { dirtyDisposition: "dirty" } });
+  t.after(() => fs.rm(f.root, { recursive: true, force: true }));
+  await fs.writeFile(
+    f.checkpointPath,
+    JSON.stringify({
+      operationId: f.operationId,
+      generation: 1,
+      sessionId: "old-session",
+      repoPath: f.repoPath,
+      sourceRevision: f.contract.sourceRevision,
+      dirtyDisposition: "dirty",
+      nextAction: "continue the bounded task",
+    }),
+  );
+  f.contract.checkpointHash = createHash("sha256")
+    .update(await fs.readFile(f.checkpointPath))
+    .digest("hex");
+  f.contract.dirtyDisposition = "dirty";
+  assert.equal((await f.core.run(request(f))).code, "invalid_checkpoint");
+  assert.deepEqual(f.calls, []);
 });
 
 test("restart capacity exhaustion blocks before creating, fencing or retiring the predecessor", async (t) => {

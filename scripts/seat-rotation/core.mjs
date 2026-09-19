@@ -14,6 +14,7 @@ const STATES = new Set([
   "archive_uncertain",
   "completed",
   "cancelled",
+  "cancelled_after_fence",
   "blocked",
 ]);
 
@@ -99,6 +100,12 @@ async function checkpointContract(request) {
   if (!/^[a-f0-9]{64}$/i.test(contract.checkpointHash ?? "")) {
     throw new Error("checkpointHash must be sha256");
   }
+  // A Git revision alone says nothing about uncommitted writes. Until the
+  // native operation has a recorded dirty-tree fingerprint it supports only a
+  // positively clean checkpoint contract.
+  if (contract.dirtyDisposition !== "clean") {
+    throw new Error("dirty worktree rotation is unsupported");
+  }
   if (
     !contract.runtime ||
     typeof contract.runtime !== "object" ||
@@ -107,14 +114,22 @@ async function checkpointContract(request) {
     throw new Error("runtime contract is required");
   }
 
+  // Inspect the caller-provided path before realpath: checking only the
+  // resolved path would silently accept a symlinked handover root.
+  await Promise.all([
+    refuseSymlinks(request.handoverRoot),
+    refuseSymlinks(contract.repoPath),
+    refuseSymlinks(contract.checkpointPath),
+  ]);
   const [handoverRoot, repoPath] = await Promise.all([
     realExistingPath(request.handoverRoot, "handoverRoot"),
     realExistingPath(contract.repoPath, "repoPath"),
   ]);
-  await refuseSymlinks(handoverRoot);
-  await refuseSymlinks(repoPath);
-  await refuseSymlinks(contract.checkpointPath);
   const checkpointPath = await realExistingPath(contract.checkpointPath, "checkpointPath");
+  const handoverInRepo = path.relative(repoPath, handoverRoot);
+  if (handoverInRepo.startsWith(`..${path.sep}`) || path.isAbsolute(handoverInRepo)) {
+    throw new Error("handoverRoot is outside the agent repository");
+  }
   const relative = path.relative(handoverRoot, checkpointPath);
   if (relative === "" || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
     throw new Error("checkpoint is outside handoverRoot");
@@ -129,6 +144,7 @@ async function checkpointContract(request) {
     checkpoint.sessionId !== contract.sessionId ||
     checkpoint.repoPath !== repoPath ||
     checkpoint.sourceRevision !== contract.sourceRevision ||
+    checkpoint.dirtyDisposition !== "clean" ||
     typeof checkpoint.nextAction !== "string" ||
     checkpoint.nextAction.length === 0 ||
     "command" in checkpoint ||
@@ -168,8 +184,55 @@ export class SeatRotationCore {
     return journal;
   }
 
-  async #lock(operationId) {
-    const directory = path.join(this.journalRoot, "locks", `${operationId}.lock`);
+  cancellationPath(operationId) {
+    safeId(operationId, "operationId");
+    return path.join(this.journalRoot, "cancellations", `${operationId}.json`);
+  }
+
+  async #cancellation(operationId) {
+    try {
+      return await readJson(this.cancellationPath(operationId));
+    } catch (error) {
+      if (error.code === "ENOENT") return undefined;
+      throw error;
+    }
+  }
+
+  async #honourCancellation(journal) {
+    if (!(await this.#cancellation(journal.operationId))) return false;
+    if (journal.state === "completed") return false;
+    if (["fenced", "archived", "activated", "archive_uncertain"].includes(journal.state)) {
+      try {
+        const stopped = await this.adapter.stopSuccessor?.({
+          successorId: journal.successorId,
+          operationId: journal.operationId,
+          state: journal.state,
+        });
+        if (stopped?.stopped !== true) throw new Error("successor stop was not acknowledged");
+      } catch (error) {
+        journal.error = `successor stop uncertain: ${error.message}`;
+        await this.#write(journal);
+        return fail("cancellation_uncertain", journal.error);
+      }
+      journal.state = "cancelled_after_fence";
+    } else {
+      journal.state = "cancelled";
+    }
+    journal.cancelledAt = new Date().toISOString();
+    await this.#write(journal);
+    return fail("cancelled", journal.state);
+  }
+
+  async #lock(predecessorId, generation) {
+    // The operation lock serialises retries of one request. The generation lock
+    // is the admission fence: a different request must not retire the same
+    // predecessor generation while this request is unresolved.
+    const directory = path.join(
+      this.journalRoot,
+      "locks",
+      "generations",
+      `${predecessorId}.${generation}.lock`,
+    );
     try {
       await fs.mkdir(path.dirname(directory), { recursive: true, mode: 0o700 });
       await fs.mkdir(directory, { recursive: false, mode: 0o700 });
@@ -184,18 +247,18 @@ export class SeatRotationCore {
   async run(request) {
     let existing = await this.read(request.operationId);
     if (existing) return { ok: existing.state === "completed", replay: true, operation: existing };
-    const release = await this.#lock(request.operationId);
-    if (!release) return fail("operation_locked");
+    let contract;
+    try {
+      contract = await checkpointContract(request);
+    } catch (error) {
+      return fail("invalid_checkpoint", error.message);
+    }
+    const release = await this.#lock(request.predecessorId, contract.generation);
+    if (!release) return fail("predecessor_generation_locked");
     try {
       existing = await this.read(request.operationId);
       if (existing)
         return { ok: existing.state === "completed", replay: true, operation: existing };
-      let contract;
-      try {
-        contract = await checkpointContract(request);
-      } catch (error) {
-        return fail("invalid_checkpoint", error.message);
-      }
       let journal = await this.#write({
         version: 1,
         operationId: request.operationId,
@@ -205,6 +268,8 @@ export class SeatRotationCore {
         reconcileAttempts: 0,
         effects: [],
       });
+      const initiallyCancelled = await this.#honourCancellation(journal);
+      if (initiallyCancelled) return initiallyCancelled;
       let safety;
       try {
         safety = await this.adapter.preflight({ predecessorId: request.predecessorId, contract });
@@ -234,8 +299,29 @@ export class SeatRotationCore {
         await this.#write(journal);
         return fail("unsafe_preflight", journal.error);
       }
+      let source;
+      try {
+        source = await this.adapter.readSourceSnapshot({ repoPath: contract.repoPath });
+      } catch (error) {
+        journal.state = "blocked";
+        journal.error = `source snapshot uncertain: ${error.message}`;
+        await this.#write(journal);
+        return fail("source_snapshot_uncertain", journal.error);
+      }
+      if (
+        source?.repoPath !== contract.repoPath ||
+        source?.sourceRevision !== contract.sourceRevision ||
+        source?.dirtyDisposition !== "clean"
+      ) {
+        journal.state = "blocked";
+        journal.error = "source snapshot no longer matches the clean checkpoint";
+        await this.#write(journal);
+        return fail("source_snapshot_mismatch", journal.error);
+      }
       journal.state = "preflighted";
       await this.#write(journal);
+      const preCreateCancellation = await this.#honourCancellation(journal);
+      if (preCreateCancellation) return preCreateCancellation;
       let created;
       try {
         created = await this.adapter.createPreparedSuccessor({
@@ -258,6 +344,8 @@ export class SeatRotationCore {
       journal.effects.push("prepared_successor_created");
       journal.state = "prepared";
       await this.#write(journal);
+      const preparedCancellation = await this.#honourCancellation(journal);
+      if (preparedCancellation) return preparedCancellation;
       let readiness;
       try {
         readiness = await this.adapter.readSuccessorReadiness({
@@ -287,6 +375,8 @@ export class SeatRotationCore {
       journal.successorSessionId = readiness.sessionId;
       journal.successorGeneration = contract.generation + 1;
       await this.#write(journal);
+      const readyCancellation = await this.#honourCancellation(journal);
+      if (readyCancellation) return readyCancellation;
       let fence;
       try {
         fence = await this.adapter.fencePredecessor({
@@ -306,6 +396,8 @@ export class SeatRotationCore {
       journal.effects.push("predecessor_fenced");
       journal.state = "fenced";
       await this.#write(journal);
+      const fencedCancellation = await this.#honourCancellation(journal);
+      if (fencedCancellation) return fencedCancellation;
       try {
         const archived = await this.adapter.archivePredecessor({
           predecessorId: request.predecessorId,
@@ -321,6 +413,8 @@ export class SeatRotationCore {
       journal.effects.push("predecessor_archived");
       journal.state = "archived";
       await this.#write(journal);
+      const archivedCancellation = await this.#honourCancellation(journal);
+      if (archivedCancellation) return archivedCancellation;
       let activation;
       try {
         activation = await this.adapter.activateSuccessor({
@@ -340,6 +434,8 @@ export class SeatRotationCore {
       journal.effects.push("successor_activated");
       journal.state = "activated";
       await this.#write(journal);
+      const activatedCancellation = await this.#honourCancellation(journal);
+      if (activatedCancellation) return activatedCancellation;
       journal.state = "completed";
       await this.#write(journal);
       return { ok: true, replay: false, operation: journal };
@@ -351,21 +447,24 @@ export class SeatRotationCore {
   async cancel(operationId) {
     const journal = await this.read(operationId);
     if (!journal) return fail("operation_missing");
-    if (
-      ["fenced", "archived", "activated", "archive_uncertain", "completed"].includes(journal.state)
-    ) {
-      return fail("cancellation_unsafe", journal.state);
-    }
-    journal.state = "cancelled";
-    journal.cancelledAt = new Date().toISOString();
-    await this.#write(journal);
-    return { ok: true, operation: journal };
+    if (journal.state === "completed") return fail("cancellation_unsafe", journal.state);
+    // Do not race the operation journal. This sidecar is a durable, monotonic
+    // Stop latch; the running operation observes it before activation and after
+    // every awaited irreversible call.
+    await writeJsonDurably(this.cancellationPath(operationId), {
+      operationId,
+      requestedAt: new Date().toISOString(),
+    });
+    const result = await this.#honourCancellation(journal);
+    return result?.code === "cancelled"
+      ? { ok: true, operation: await this.read(operationId) }
+      : { ok: true, cancellationRequested: true, operation: journal };
   }
 
   async reconcile(operationId) {
     const journal = await this.read(operationId);
     if (!journal) return fail("operation_missing");
-    if (["completed", "cancelled"].includes(journal.state))
+    if (["completed", "cancelled", "cancelled_after_fence"].includes(journal.state))
       return { ok: true, terminal: true, operation: journal };
     if (journal.reconcileAttempts >= this.maxReconcileAttempts) {
       journal.state = "blocked";

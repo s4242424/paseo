@@ -137,6 +137,16 @@ export type AgentRunCancellationResult =
   | { status: "settled" }
   | { status: "refused" };
 
+/**
+ * An in-process admission record for a native handover. Its durable counterpart
+ * is owned by the seat-rotation service; this record closes the gap between a
+ * safety read and the next prompt admission in this manager instance.
+ */
+export interface NativeSeatRotationAdmission {
+  operationId: string;
+  generation: number;
+}
+
 interface PreparedSessionConfig {
   storedConfig: AgentSessionConfig;
   launchConfig: AgentSessionConfig;
@@ -701,6 +711,7 @@ export class AgentManager {
   private readonly sessionEventTails = new Map<string, Promise<void>>();
   private readonly steerEventBarriers = new Map<string, SteerEventBarrier>();
   private readonly foregroundMutationTails = new Map<string, Promise<void>>();
+  private readonly nativeSeatRotationAdmissions = new Map<string, NativeSeatRotationAdmission>();
   private readonly runs = new AgentRunState();
   private readonly subscribers = new Set<SubscriptionRecord>();
   private readonly idFactory: () => string;
@@ -1138,6 +1149,49 @@ export class AgentManager {
   getAgent(id: string): ManagedAgent | null {
     const agent = this.agents.get(id);
     return agent ? { ...agent } : null;
+  }
+
+  /**
+   * Reserve an idle predecessor generation before a successor is prepared.
+   * Every foreground write entrypoint checks this same map, so an unrelated
+   * prompt cannot slip between preflight and archive.
+   */
+  beginNativeSeatRotationAdmission(agentId: string, admission: NativeSeatRotationAdmission): void {
+    const existing = this.nativeSeatRotationAdmissions.get(agentId);
+    if (existing) {
+      if (
+        existing.operationId === admission.operationId &&
+        existing.generation === admission.generation
+      ) {
+        return;
+      }
+      throw new Error(
+        `Agent ${agentId} generation ${existing.generation} is already reserved by native rotation ${existing.operationId}`,
+      );
+    }
+    const agent = this.requireSessionAgent(agentId);
+    if (this.hasInFlightRun(agentId)) {
+      throw new Error(`Agent ${agentId} has an active foreground writer`);
+    }
+    if (agent.pendingPermissions.size > 0 || agent.inFlightPermissionResponses.size > 0) {
+      throw new Error(`Agent ${agentId} has unresolved permissions`);
+    }
+    if (this.providerSubagents.list(agentId).length > 0) {
+      throw new Error(`Agent ${agentId} has provider subagents; native rotation is unsupported`);
+    }
+    this.nativeSeatRotationAdmissions.set(agentId, { ...admission });
+  }
+
+  endNativeSeatRotationAdmission(agentId: string, operationId: string): void {
+    const existing = this.nativeSeatRotationAdmissions.get(agentId);
+    if (existing?.operationId === operationId) {
+      this.nativeSeatRotationAdmissions.delete(agentId);
+    }
+  }
+
+  getNativeSeatRotationAdmission(agentId: string): NativeSeatRotationAdmission | null {
+    const admission = this.nativeSeatRotationAdmissions.get(agentId);
+    return admission ? { ...admission } : null;
   }
 
   async waitForAgentClose(agentId: string): Promise<void> {
@@ -2282,6 +2336,7 @@ export class AgentManager {
    * broadcast like normal timeline events.
    */
   tryRunOutOfBand(agentId: string, prompt: AgentPromptInput, options?: AgentRunOptions): boolean {
+    this.assertNativeSeatRotationAllowsPrompt(agentId);
     const agent = this.requireSessionAgent(agentId);
     const handler = agent.session.tryHandleOutOfBand?.(prompt);
     if (!handler) {
@@ -2400,6 +2455,7 @@ export class AgentManager {
     prompt: AgentPromptInput,
     options?: AgentRunOptions,
   ): AsyncGenerator<AgentStreamEvent> {
+    this.assertNativeSeatRotationAllowsPrompt(agentId);
     const existingAgent = this.requireSessionAgent(agentId);
     this.logger.trace(
       {
@@ -2439,6 +2495,9 @@ export class AgentManager {
     const streamForwarder = async function* streamForwarder(this: AgentManager) {
       let turnId: string;
       let turnStream: ReturnType<AgentRunState["createTurnStream"]> | null = null;
+      // An iterator can be admitted by a caller and only consumed after a
+      // rotation fence is established. Re-check at the provider-write boundary.
+      this.assertNativeSeatRotationAllowsPrompt(agentId);
       turnId = await this.startPendingForegroundTurn({
         agent,
         agentId,
@@ -2597,6 +2656,7 @@ export class AgentManager {
     prompt: AgentPromptInput,
     options?: AgentRunOptions,
   ): Promise<AsyncGenerator<AgentStreamEvent>> {
+    this.assertNativeSeatRotationAllowsPrompt(agentId);
     const snapshot = this.requireAgent(agentId);
     if (
       snapshot.lifecycle !== "running" &&
@@ -2657,6 +2717,7 @@ export class AgentManager {
     prompt: AgentPromptInput,
     options?: AgentSteerOptions,
   ): Promise<ActiveTurnSteerDispatchResult> {
+    this.assertNativeSeatRotationAllowsPrompt(agentId);
     const agent = this.requireSessionAgent(agentId);
     const expectedTurnId = agent.activeForegroundTurnId ?? agent.activeTurnId;
     if (!expectedTurnId) {
@@ -2743,6 +2804,15 @@ export class AgentManager {
       if (this.foregroundMutationTails.get(agentId) === tail) {
         this.foregroundMutationTails.delete(agentId);
       }
+    }
+  }
+
+  private assertNativeSeatRotationAllowsPrompt(agentId: string): void {
+    const admission = this.nativeSeatRotationAdmissions.get(agentId);
+    if (admission) {
+      throw new Error(
+        `Agent ${agentId} is reserved by native rotation ${admission.operationId} for generation ${admission.generation}`,
+      );
     }
   }
 

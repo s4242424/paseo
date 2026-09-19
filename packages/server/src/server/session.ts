@@ -1,5 +1,6 @@
 import type { SessionEventSubscription } from "@getpaseo/protocol/messages";
 import type { AgentRequests } from "./agent/requests/index.js";
+import { NativeSeatRotationService } from "./agent/native-seat-rotation.js";
 import equal from "fast-deep-equal";
 import { v4 as uuidv4 } from "uuid";
 import { lstat, mkdir, mkdtemp, rename, rm, stat } from "node:fs/promises";
@@ -755,6 +756,7 @@ export class Session {
   private readonly hubExecutionController: HubExecutionController | null;
   private readonly workspaceScripts: WorkspaceScriptsService;
   private readonly agentRequests: Pick<AgentRequests, "create" | "send">;
+  private readonly nativeSeatRotation: NativeSeatRotationService;
   private readonly createAgentLifecycleDispatch: CreateAgentLifecycleDispatch;
 
   constructor(options: SessionOptions) {
@@ -829,6 +831,11 @@ export class Session {
     this.pushNotifications = pushNotifications;
     this.paseoHome = paseoHome;
     this.agentRequests = options.agentRequests;
+    this.nativeSeatRotation = new NativeSeatRotationService({
+      paseoHome,
+      agentManager,
+      agentStorage,
+    });
     this.projectIcons = new ProjectIconReader(paseoHome);
     this.worktreesRoot = worktreesRoot;
     this.pluginRuntime = pluginRuntime;
@@ -2002,6 +2009,7 @@ export class Session {
       this.dispatchAgentRelationshipMessage(msg) ??
       this.dispatchAgentTimelineMessage(msg, source) ??
       this.dispatchHubExecutionMessage(msg) ??
+      this.dispatchAgentSeatRotationMessage(msg) ??
       this.dispatchAgentLifecycleMessage(msg) ??
       this.dispatchAgentConfigMessage(msg) ??
       this.dispatchCheckoutMessage(msg) ??
@@ -2425,6 +2433,19 @@ export class Session {
         return this.handleAgentPermissionResponse(msg.agentId, msg.requestId, msg.response);
       case "clear_agent_attention":
         return this.handleClearAgentAttention(msg.agentId, msg.requestId);
+      default:
+        return undefined;
+    }
+  }
+
+  private dispatchAgentSeatRotationMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    switch (msg.type) {
+      case "agent.seat_rotation.request":
+        return this.handleAgentSeatRotationRequest(msg);
+      case "agent.seat_rotation.cancel.request":
+        return this.handleAgentSeatRotationCancelRequest(msg);
+      case "agent.seat_rotation.inspect.request":
+        return this.handleAgentSeatRotationInspectRequest(msg);
       default:
         return undefined;
     }
@@ -7647,6 +7668,108 @@ export class Session {
           requestId: msg.requestId,
           agentId: resolved.agentId,
           accepted: false,
+          error: errorToFriendlyMessage(error),
+        },
+      });
+    }
+  }
+
+  private async handleAgentSeatRotationRequest(
+    msg: Extract<SessionInboundMessage, { type: "agent.seat_rotation.request" }>,
+  ): Promise<void> {
+    try {
+      const result = await this.nativeSeatRotation.rotate({
+        operationId: msg.operationId,
+        predecessorId: msg.predecessorId,
+        generation: msg.generation,
+        handoverRoot: msg.handoverRoot,
+        checkpointPath: msg.checkpointPath,
+        resumePrompt: msg.resumePrompt,
+      });
+      this.emit({
+        type: "agent.seat_rotation.response",
+        payload: {
+          requestId: msg.requestId,
+          accepted: result.accepted,
+          state: result.operation.state,
+          successorId: result.operation.successorId ?? null,
+          error: null,
+        },
+      });
+    } catch (error) {
+      this.emit({
+        type: "agent.seat_rotation.response",
+        payload: {
+          requestId: msg.requestId,
+          accepted: false,
+          state: null,
+          successorId: null,
+          error: errorToFriendlyMessage(error),
+        },
+      });
+    }
+  }
+
+  private async handleAgentSeatRotationCancelRequest(
+    msg: Extract<SessionInboundMessage, { type: "agent.seat_rotation.cancel.request" }>,
+  ): Promise<void> {
+    try {
+      const result = await this.nativeSeatRotation.cancel(msg.operationId);
+      this.emit({
+        type: "agent.seat_rotation.cancel.response",
+        payload: {
+          requestId: msg.requestId,
+          accepted: result.accepted,
+          state: result.operation.state,
+          successorId: result.operation.successorId ?? null,
+          error: null,
+        },
+      });
+    } catch (error) {
+      this.emit({
+        type: "agent.seat_rotation.cancel.response",
+        payload: {
+          requestId: msg.requestId,
+          accepted: false,
+          state: null,
+          successorId: null,
+          error: errorToFriendlyMessage(error),
+        },
+      });
+    }
+  }
+
+  private async handleAgentSeatRotationInspectRequest(
+    msg: Extract<SessionInboundMessage, { type: "agent.seat_rotation.inspect.request" }>,
+  ): Promise<void> {
+    try {
+      const state = await this.nativeSeatRotation.inspect(msg.operationId);
+      this.emit({
+        type: "agent.seat_rotation.inspect.response",
+        payload: {
+          requestId: msg.requestId,
+          operationId: msg.operationId,
+          phase: state?.phase ?? null,
+          successorId: state?.successorId ?? null,
+          workspaceId: state?.workspaceId ?? null,
+          sourceRevision: state?.sourceRevision ?? null,
+          revision: state?.revision ?? null,
+          failureCode: state?.failureCode ?? null,
+          error: null,
+        },
+      });
+    } catch (error) {
+      this.emit({
+        type: "agent.seat_rotation.inspect.response",
+        payload: {
+          requestId: msg.requestId,
+          operationId: msg.operationId,
+          phase: null,
+          successorId: null,
+          workspaceId: null,
+          sourceRevision: null,
+          revision: null,
+          failureCode: null,
           error: errorToFriendlyMessage(error),
         },
       });

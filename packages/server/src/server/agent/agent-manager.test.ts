@@ -691,6 +691,37 @@ test("uses an injected timeline store without making it a production requirement
   }
 });
 
+test("native rotation admission fences competing manager prompt admissions", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-native-rotation-race-"));
+  const manager = new AgentManager({ clients: { codex: new TestAgentClient() }, logger });
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+
+    manager.beginNativeSeatRotationAdmission(agent.id, {
+      operationId: "rotate-race-001",
+      generation: 1,
+    });
+
+    expect(manager.getNativeSeatRotationAdmission(agent.id)).toEqual({
+      operationId: "rotate-race-001",
+      generation: 1,
+    });
+    expect(() => manager.streamAgent(agent.id, "competing write")).toThrow(
+      "reserved by native rotation",
+    );
+    expect(() =>
+      manager.beginNativeSeatRotationAdmission(agent.id, {
+        operationId: "rotate-race-002",
+        generation: 1,
+      }),
+    ).toThrow("already reserved");
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
 test("retries provider history hydration after a stream failure", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-history-retry-"));
   let attempts = 0;
