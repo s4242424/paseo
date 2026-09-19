@@ -4208,6 +4208,7 @@ export class CodexAppServerAgentSession implements AgentSession {
       const turnStart = await this.buildTurnStartParams(effectivePrompt, options);
       const turnId = this.createTurnId();
       this.activeForegroundTurnId = turnId;
+      this.latestUsage = undefined;
       this.activeClientMessageId = options?.clientMessageId ?? null;
       this.currentTurnId = null;
       this.pendingForegroundTurnIdentification?.resolve(null);
@@ -5896,6 +5897,7 @@ export class CodexAppServerAgentSession implements AgentSession {
     parsed: Extract<ParsedCodexNotification, { kind: "thread_started" }>,
   ): void {
     this.currentThreadId = parsed.threadId;
+    this.latestUsage = undefined;
     this.emitEvent({
       type: "thread_started",
       provider: CODEX_PROVIDER,
@@ -6017,6 +6019,16 @@ export class CodexAppServerAgentSession implements AgentSession {
   private handleTokenUsageUpdatedNotification(
     parsed: Extract<ParsedCodexNotification, { kind: "token_usage_updated" }>,
   ): void {
+    if (parsed.threadId && parsed.threadId !== this.currentThreadId) {
+      this.logger.debug(
+        { eventThreadId: parsed.threadId, currentThreadId: this.currentThreadId },
+        "Ignoring Codex token usage from a non-current thread",
+      );
+      return;
+    }
+    // The app-server notification identifies a thread but not the native turn that produced
+    // the tuple. Keep its legacy fields for display, but do not bind them to the active turn or
+    // claim provider confirmation: a delayed previous-turn update is indistinguishable here.
     this.latestUsage = toAgentUsage(parsed.tokenUsage);
     if (this.latestUsage) {
       this.notifySubscribers({

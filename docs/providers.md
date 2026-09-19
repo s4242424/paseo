@@ -551,6 +551,17 @@ Tests use `isProviderAvailable(provider)` to skip when the binary or credentials
 
 ---
 
+## Context window observations
+
+Context-window token fields remain optional usage telemetry. A provider that reports a current
+occupancy and limit must attach `contextWindowObservation` with the native session and turn IDs,
+the observation time, and a source tag. Consumers may act on a ratio only when the tag is
+`provider-confirmed`. A model manifest or catalog limit is `catalog-fallback`, never confirmation.
+If the native event cannot bind both values to the active session and turn, emit `unknown` rather
+than deriving a ratio from cumulative spend or a previous session. When a provider cannot identify
+the source turn, keep any legacy token fields unobserved: absence of
+`contextWindowObservation` is unsupported/unknown and must not trigger an action.
+
 ## Gotchas
 
 **Mode IDs can be URIs.** ACP providers like Copilot use full URIs as mode IDs (e.g., `"https://agentclientprotocol.com/protocol/session-modes#agent"`). Never assume mode IDs are simple strings. The manifest `defaultModeId` must match exactly.

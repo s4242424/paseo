@@ -5560,7 +5560,7 @@ describe("Codex app-server provider", () => {
     ]);
   });
 
-  test("emits usage_updated on token usage updates and keeps usage on turn completion", () => {
+  test("keeps unbound Codex token usage out of trusted context observations", () => {
     const session = createSession();
     const events: AgentStreamEvent[] = [];
     session.subscribe((event) => events.push(event));
@@ -5604,6 +5604,72 @@ describe("Codex app-server provider", () => {
         contextWindowUsedTokens: 50000,
       },
     });
+  });
+
+  test("does not bind incomplete native context telemetry to the active turn", () => {
+    const session = createSession();
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    asInternals(session).handleNotification("thread/tokenUsage/updated", {
+      tokenUsage: {
+        last: { inputTokens: 30_000, outputTokens: 15_000 },
+      },
+    });
+
+    expect(events).toContainEqual({
+      type: "usage_updated",
+      provider: "codex",
+      turnId: "test-turn",
+      usage: {
+        inputTokens: 30_000,
+        outputTokens: 15_000,
+      },
+    });
+  });
+
+  test("rejects a delayed Codex token update from a previous native session", () => {
+    const session = createSession();
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    asInternals(session).handleNotification("thread/tokenUsage/updated", {
+      threadId: "previous-thread",
+      tokenUsage: {
+        model_context_window: 200_000,
+        last: { total_tokens: 50_000 },
+      },
+    });
+
+    expect(events).toEqual([]);
+  });
+
+  test("does not rebind a delayed Codex token update to the next active turn", () => {
+    const session = createSession();
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+    asInternals(session).currentTurnId = "native-turn-2";
+    session.activeForegroundTurnId = "foreground-turn-2";
+
+    asInternals(session).handleNotification("thread/tokenUsage/updated", {
+      threadId: "test-thread",
+      tokenUsage: {
+        model_context_window: 200_000,
+        last: { total_tokens: 50_000 },
+      },
+    });
+
+    expect(events).toEqual([
+      {
+        type: "usage_updated",
+        provider: "codex",
+        turnId: "foreground-turn-2",
+        usage: {
+          contextWindowMaxTokens: 200_000,
+          contextWindowUsedTokens: 50_000,
+        },
+      },
+    ]);
   });
 
   test("streams Codex assistant message deltas and does not replay completed text", () => {

@@ -425,6 +425,15 @@ const AgentCapabilityFlagsSchema: z.ZodType<AgentCapabilityFlags> = z
   })
   .catchall(z.boolean());
 
+const ContextWindowObservationSchema: z.ZodType<AgentUsage["contextWindowObservation"]> = z.object({
+  sessionId: z.string(),
+  turnId: z.string(),
+  observedAt: z.string(),
+  contextWindowSource: z.enum(["provider-confirmed", "catalog-fallback", "unknown"]),
+  usedTokens: z.number().optional(),
+  maxTokens: z.number().optional(),
+});
+
 const AgentUsageSchema: z.ZodType<AgentUsage> = z.object({
   inputTokens: z.number().optional(),
   cachedInputTokens: z.number().optional(),
@@ -432,6 +441,7 @@ const AgentUsageSchema: z.ZodType<AgentUsage> = z.object({
   totalCostUsd: z.number().optional(),
   contextWindowMaxTokens: z.number().optional(),
   contextWindowUsedTokens: z.number().optional(),
+  contextWindowObservation: ContextWindowObservationSchema.optional(),
 });
 
 const McpStdioServerConfigSchema = z.object({

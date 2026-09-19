@@ -419,6 +419,14 @@ describe("toAgentPayload", () => {
         inputTokens: 10,
         contextWindowMaxTokens: 200_000,
         contextWindowUsedTokens: 42_000,
+        contextWindowObservation: {
+          sessionId: "native-session-1",
+          turnId: "native-turn-1",
+          observedAt: "2026-09-19T22:00:00.000Z",
+          contextWindowSource: "provider-confirmed",
+          usedTokens: 42_000,
+          maxTokens: 200_000,
+        },
       },
     });
 
@@ -428,7 +436,31 @@ describe("toAgentPayload", () => {
       inputTokens: 10,
       contextWindowMaxTokens: 200_000,
       contextWindowUsedTokens: 42_000,
+      contextWindowObservation: {
+        sessionId: "native-session-1",
+        turnId: "native-turn-1",
+        observedAt: "2026-09-19T22:00:00.000Z",
+        contextWindowSource: "provider-confirmed",
+        usedTokens: 42_000,
+        maxTokens: 200_000,
+      },
     });
+  });
+
+  it("omits context usage when its observation is malformed", () => {
+    const agent = createManagedAgent({
+      lastUsage: {
+        contextWindowUsedTokens: 42_000,
+        contextWindowObservation: {
+          sessionId: "native-session-1",
+          turnId: "native-turn-1",
+          observedAt: "2026-09-19T22:00:00.000Z",
+          contextWindowSource: "catalog" as "unknown",
+        },
+      },
+    });
+
+    expect(toAgentPayload(agent).lastUsage).toBeUndefined();
   });
 
   it("omits lastUsage when context window usage fields are invalid", () => {

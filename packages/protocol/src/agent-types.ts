@@ -175,6 +175,21 @@ export interface AgentRunOptions {
   maxThinkingTokens?: number;
 }
 
+export type ContextWindowSource = "provider-confirmed" | "catalog-fallback" | "unknown";
+
+/**
+ * A provider-scoped observation of the current context window. Consumers must
+ * require `provider-confirmed` before acting on the ratio.
+ */
+export interface ContextWindowObservation {
+  sessionId: string;
+  turnId: string;
+  observedAt: string;
+  contextWindowSource: ContextWindowSource;
+  usedTokens?: number;
+  maxTokens?: number;
+}
+
 export interface AgentUsage {
   inputTokens?: number;
   cachedInputTokens?: number;
@@ -182,6 +197,7 @@ export interface AgentUsage {
   totalCostUsd?: number;
   contextWindowMaxTokens?: number;
   contextWindowUsedTokens?: number;
+  contextWindowObservation?: ContextWindowObservation;
 }
 
 export const TOOL_CALL_ICON_NAMES = [
