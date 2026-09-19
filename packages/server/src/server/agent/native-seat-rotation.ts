@@ -208,6 +208,32 @@ export class NativeSeatRotationService {
         checkpoint,
         revalidatedCheckpoint,
       );
+      const beforeArchive = this.options.agentManager.getAgent(request.predecessorId);
+      if (!beforeArchive || beforeArchive.lifecycle === "closed") {
+        throw new Error("rotation predecessor changed before archive");
+      }
+      const checkpointBeforeArchive = await this.validateCheckpoint(request, beforeArchive);
+      this.assertPredecessorUnchanged(
+        predecessor,
+        beforeArchive,
+        checkpoint,
+        checkpointBeforeArchive,
+      );
+
+      await this.options.agentManager.archiveAgent(request.predecessorId);
+      journal = await this.write({ ...journal, state: "archived" });
+
+      // archiveAgent resolves only after the provider runtime has stopped.
+      // Re-read the handover and repository now, before any successor session
+      // exists: a delayed provider/tool write during shutdown must not inherit
+      // a stale checkpoint into a new seat.
+      const postArchiveCheckpoint = await this.validateCheckpointAfterArchive(request, checkpoint);
+      this.assertCheckpointUnchangedAfterArchive(checkpoint, postArchiveCheckpoint);
+
+      if (await this.isCancelledFor(request.operationId, request.predecessorId)) {
+        return await this.stopAfterFence(journal);
+      }
+
       const successorId = randomUUID();
       // Persist the successor identity before createSession. If the process dies
       // after a provider acknowledgement, recovery can inspect this one ID and
@@ -224,25 +250,6 @@ export class NativeSeatRotationService {
         },
       );
       this.assertPreparedSuccessor({ predecessor, successor, checkpoint });
-
-      if (await this.isCancelledFor(request.operationId, request.predecessorId)) {
-        return await this.stopBeforeArchive(journal);
-      }
-
-      const beforeArchive = this.options.agentManager.getAgent(request.predecessorId);
-      if (!beforeArchive || beforeArchive.lifecycle === "closed") {
-        throw new Error("rotation predecessor changed before archive");
-      }
-      const checkpointBeforeArchive = await this.validateCheckpoint(request, beforeArchive);
-      this.assertPredecessorUnchanged(
-        predecessor,
-        beforeArchive,
-        checkpoint,
-        checkpointBeforeArchive,
-      );
-
-      await this.options.agentManager.archiveAgent(request.predecessorId);
-      journal = await this.write({ ...journal, state: "archived" });
 
       if (await this.isCancelledFor(request.operationId, request.predecessorId)) {
         return await this.stopAfterFence(journal);
@@ -514,6 +521,37 @@ export class NativeSeatRotationService {
     return { checkpoint, checkpointPath, checkpointHash, repoPath };
   }
 
+  /**
+   * The predecessor no longer has a live manager record after archive. Keep the
+   * identity checks made before archive, then prove that the same immutable
+   * handover and clean repository survived the provider shutdown.
+   */
+  private async validateCheckpointAfterArchive(
+    request: NativeSeatRotationRequest,
+    initial: ValidatedCheckpoint,
+  ): Promise<ValidatedCheckpoint> {
+    await Promise.all([
+      refuseSymlinks(request.handoverRoot),
+      refuseSymlinks(request.checkpointPath),
+      refuseSymlinks(initial.repoPath),
+    ]);
+    const [handoverRoot, checkpointPath, repoPath] = await Promise.all([
+      fs.realpath(request.handoverRoot),
+      fs.realpath(request.checkpointPath),
+      fs.realpath(initial.repoPath),
+    ]);
+    requireWithin(handoverRoot, checkpointPath, "checkpoint is outside handover root");
+    requireWithin(repoPath, handoverRoot, "handover root is outside predecessor repository");
+    const raw = await fs.readFile(checkpointPath);
+    const checkpointHash = createHash("sha256").update(raw).digest("hex");
+    const checkpoint = CheckpointSchema.parse(JSON.parse(raw.toString("utf8")));
+    const snapshot = await readCleanGitSnapshot(repoPath, checkpointPath);
+    if (snapshot.sourceRevision !== checkpoint.sourceRevision) {
+      throw new Error("checkpoint source revision no longer matches the repository");
+    }
+    return { checkpoint, checkpointPath, checkpointHash, repoPath };
+  }
+
   private assertPreparedSuccessor(input: {
     predecessor: ManagedAgent;
     successor: ManagedAgent;
@@ -551,6 +589,21 @@ export class NativeSeatRotationService {
       throw new Error(
         "rotation source, checkpoint, or predecessor session changed after admission",
       );
+    }
+  }
+
+  private assertCheckpointUnchangedAfterArchive(
+    initial: ValidatedCheckpoint,
+    current: ValidatedCheckpoint,
+  ): void {
+    if (
+      initial.repoPath !== current.repoPath ||
+      initial.checkpointPath !== current.checkpointPath ||
+      initial.checkpointHash !== current.checkpointHash ||
+      initial.checkpoint.sourceRevision !== current.checkpoint.sourceRevision ||
+      initial.checkpoint.timelineRevision !== current.checkpoint.timelineRevision
+    ) {
+      throw new Error("rotation source or checkpoint changed while predecessor stopped");
     }
   }
 

@@ -188,7 +188,7 @@ test("writes a receipt and fences the real manager surface before archive and re
   const result = await f.service.rotate(request(f));
   expect(result.accepted).toBe(true);
   expect(result.operation.state).toBe("resume_uncertain");
-  expect(f.calls).toEqual(["admit", "create", "archive", "resume"]);
+  expect(f.calls).toEqual(["admit", "archive", "create", "resume"]);
   const journal = JSON.parse(await readFile(f.journalPath, "utf8"));
   expect(journal).toMatchObject({ operationId, state: "resume_uncertain" });
   expect(journal.successorId).toMatch(/[a-f0-9-]{36}/);
@@ -204,16 +204,18 @@ test("writes a receipt and fences the real manager surface before archive and re
   expect(f.calls.filter((call) => call === "create")).toHaveLength(1);
 });
 
-test("a Stop latched during successor preparation prevents old closure and resume", async () => {
+test("a Stop latched during successor preparation closes it and records the archive fence", async () => {
   const f = await fixture({ holdCreate: true });
   const rotation = f.service.rotate(request(f));
   while (!f.calls.includes("create")) await new Promise((resolve) => setImmediate(resolve));
   const stopped = f.service.cancel(operationId);
   while (!(await exists(f.cancellationPath))) await new Promise((resolve) => setImmediate(resolve));
   f.releaseCreate();
-  await expect(stopped).resolves.toMatchObject({ operation: { state: "cancelled" } });
+  await expect(stopped).resolves.toMatchObject({
+    operation: { state: "cancelled_after_fence" },
+  });
   await expect(rotation).resolves.toMatchObject({ accepted: false });
-  expect(f.calls).not.toContain("archive");
+  expect(f.calls).toContain("archive");
   expect(f.calls).not.toContain("resume");
 });
 

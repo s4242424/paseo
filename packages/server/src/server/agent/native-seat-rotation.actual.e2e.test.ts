@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { afterEach, expect, test, vi } from "vitest";
-import type { AgentClient, AgentSessionConfig } from "./agent-sdk-types.js";
+import type { AgentClient } from "./agent-sdk-types.js";
 import { createTestAgentClient } from "../test-utils/fake-agent-client.js";
 import { DaemonClient } from "../test-utils/daemon-client.js";
 import { createTestPaseoDaemon, type TestPaseoDaemon } from "../test-utils/paseo-daemon.js";
@@ -58,35 +58,6 @@ async function setup(options?: { agentClients?: Record<string, AgentClient> }) {
     predecessor,
     sessionId: managed.persistence.sessionId,
   };
-}
-
-function heldSecondCodexSession() {
-  const base = createTestAgentClient("codex");
-  let sessions = 0;
-  let release!: () => void;
-  let reached!: () => void;
-  const released = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const preparing = new Promise<void>((resolve) => {
-    reached = resolve;
-  });
-  const client: AgentClient = {
-    provider: base.provider,
-    capabilities: base.capabilities,
-    async createSession(config: AgentSessionConfig, launchContext) {
-      sessions += 1;
-      if (sessions === 2) {
-        reached();
-        await released;
-      }
-      return await base.createSession(config, launchContext);
-    },
-    resumeSession: base.resumeSession.bind(base),
-    fetchCatalog: base.fetchCatalog.bind(base),
-    isAvailable: base.isAvailable.bind(base),
-  };
-  return { client, preparing, release: () => release() };
 }
 
 async function checkpoint(
@@ -161,44 +132,40 @@ test("a stale checkpoint is refused after a later normal chat changes the real m
   ).rejects.toThrow("conversation boundary");
 });
 
-test("the real manager fences normal client writes during preparation and releases a failed changed checkpoint", async () => {
-  const held = heldSecondCodexSession();
-  const f = await setup({ agentClients: { codex: held.client } });
+test("a provider late write during archive is detected before a successor session exists", async () => {
+  let lateWrite: (() => Promise<void>) | undefined;
+  let sessionCreates = 0;
+  const base = createTestAgentClient("codex", {
+    closeSession: async () => await lateWrite?.(),
+  });
+  const client: AgentClient = {
+    provider: base.provider,
+    capabilities: base.capabilities,
+    async createSession(...args) {
+      sessionCreates += 1;
+      return await base.createSession(...args);
+    },
+    resumeSession: base.resumeSession.bind(base),
+    fetchCatalog: base.fetchCatalog.bind(base),
+    isAvailable: base.isAvailable.bind(base),
+  };
+  const f = await setup({ agentClients: { codex: client } });
   const operationId = randomUUID();
   const checkpointPath = await checkpoint(f, operationId, 0);
-  const rotation = f.first.rotateAgentSeat({
-    operationId,
-    predecessorId: f.predecessor.id,
-    generation: 1,
-    handoverRoot: f.handoverRoot,
-    checkpointPath,
-    resumePrompt: "continue",
-  });
-  await held.preparing;
-  await expect(f.second.sendMessage(f.predecessor.id, "writer during preparation")).rejects.toThrow(
-    "reserved by native rotation",
-  );
-  await writeFile(
-    checkpointPath,
-    JSON.stringify({
+  lateWrite = async () => await writeFile(path.join(f.repoPath, "late-write.txt"), "late\n");
+  await expect(
+    f.first.rotateAgentSeat({
       operationId,
+      predecessorId: f.predecessor.id,
       generation: 1,
-      sessionId: f.sessionId,
-      repoPath: f.repoPath,
-      sourceRevision: f.revision,
-      timelineRevision: 0,
-      dirtyDisposition: "clean",
-      nextAction: "checkpoint changed while preparing",
+      handoverRoot: f.handoverRoot,
+      checkpointPath,
+      resumePrompt: "continue",
     }),
-  );
-  held.release();
-  await expect(rotation).rejects.toThrow("changed after admission");
+  ).rejects.toThrow("dirty worktree rotation is unsupported");
   await expect(f.first.inspectAgentSeatRotation(operationId)).resolves.toMatchObject({
     phase: "failed",
     failureCode: "blocked",
   });
-  await expect(
-    f.second.sendMessage(f.predecessor.id, "writer after failed preparation"),
-  ).resolves.toBeUndefined();
-  await f.second.waitForFinish(f.predecessor.id, 5_000);
+  expect(sessionCreates).toBe(1);
 });
