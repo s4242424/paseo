@@ -92,7 +92,6 @@ interface SidebarLabels {
 }
 
 interface MobileSidebarProps extends SidebarSharedProps {
-  active: boolean;
   insetsTop: number;
   insetsBottom: number;
   closeSidebar: () => void;
@@ -226,7 +225,6 @@ export const LeftSidebar = memo(function LeftSidebar({ active }: { active: boole
         <RetainedPanelActivity active={active}>
           <MobileSidebar
             {...sharedProps}
-            active={active}
             insetsTop={insets.top}
             insetsBottom={insets.bottom}
             closeSidebar={showMobileAgent}
@@ -504,7 +502,6 @@ function SidebarFooter({
 }
 
 function MobileSidebar({
-  active,
   theme,
   workspaceGroups,
   projectIconTargets,
@@ -597,7 +594,6 @@ function MobileSidebar({
             onAddProject={handleOpenProject}
             onImportSession={handleImportSession}
             parentGestureRef={closeGestureRef}
-            dragGestureHostActive={active}
             listHeaderComponent={workspacesSectionHeaderElement}
           />
         )}
