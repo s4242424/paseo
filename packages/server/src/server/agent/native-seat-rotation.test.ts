@@ -15,7 +15,11 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-async function fixture(options?: { holdCreate?: boolean }) {
+async function fixture(options?: {
+  holdCreate?: boolean;
+  emptyResume?: boolean;
+  failStop?: boolean;
+}) {
   const root = await mkdtemp(path.join(os.tmpdir(), "native-seat-rotation-"));
   roots.push(root);
   const repoPath = path.join(root, "repo");
@@ -66,6 +70,7 @@ async function fixture(options?: { holdCreate?: boolean }) {
     beginNativeSeatRotationAdmission() {
       calls.push("admit");
     },
+    setNativeSeatRotationAdmissionLookup() {},
     endNativeSeatRotationAdmission() {
       calls.push("release");
     },
@@ -81,11 +86,13 @@ async function fixture(options?: { holdCreate?: boolean }) {
     streamAgent() {
       calls.push("resume");
       return (async function* () {
+        if (options?.emptyResume) return;
         yield { type: "turn_completed" };
       })();
     },
     async cancelAgentRun() {
       calls.push("stop");
+      if (options?.failStop) throw new Error("provider stop refused");
       return { status: "not_running" as const };
     },
     async closeAgent() {
@@ -96,6 +103,7 @@ async function fixture(options?: { holdCreate?: boolean }) {
     paseoHome: path.join(root, "paseo-home"),
     agentManager: manager,
     agentStorage: {} as AgentStorage,
+    isEnabled: () => true,
   });
   return {
     calls,
@@ -179,6 +187,7 @@ test("writes a receipt and fences the real manager surface before archive and re
   const journal = JSON.parse(await readFile(f.journalPath, "utf8"));
   expect(journal).toMatchObject({ operationId, state: "resume_uncertain" });
   expect(journal.successorId).toMatch(/[a-f0-9-]{36}/);
+  await f.service.waitForOperation(operationId);
   await expect(f.service.inspect(operationId)).resolves.toMatchObject({
     operationId,
     phase: "succeeded",
@@ -188,7 +197,6 @@ test("writes a receipt and fences the real manager surface before archive and re
   });
   await expect(f.service.rotate(request(f))).resolves.toMatchObject({ accepted: true });
   expect(f.calls.filter((call) => call === "create")).toHaveLength(1);
-  await f.service.waitForOperation(operationId);
 });
 
 test("a Stop latched during successor preparation prevents old closure and resume", async () => {
@@ -200,6 +208,22 @@ test("a Stop latched during successor preparation prevents old closure and resum
   f.releaseCreate();
   await expect(stopped).resolves.toMatchObject({ operation: { state: "cancelled" } });
   await expect(rotation).resolves.toMatchObject({ accepted: false });
+  expect(f.calls).not.toContain("archive");
+  expect(f.calls).not.toContain("resume");
+});
+
+test("a predecessor Stop records intent before the first journal and prevents admission", async () => {
+  const f = await fixture();
+  const rotation = f.service.rotate(request(f));
+  await expect(f.service.cancelForPredecessor(predecessorId)).resolves.toMatchObject({
+    accepted: true,
+    operation: null,
+  });
+  await expect(rotation).resolves.toMatchObject({
+    accepted: false,
+    operation: { state: "cancelled" },
+  });
+  expect(f.calls).not.toContain("admit");
   expect(f.calls).not.toContain("archive");
   expect(f.calls).not.toContain("resume");
 });
@@ -233,4 +257,28 @@ test("dirty repository state is refused before the manager admission", async () 
     "dirty worktree rotation is unsupported",
   );
   expect(f.calls).toEqual([]);
+});
+
+test("does not promote an empty successor iterator to success", async () => {
+  const f = await fixture({ emptyResume: true });
+  await f.service.rotate(request(f));
+  await f.service.waitForOperation(operationId);
+  await expect(f.service.inspect(operationId)).resolves.toMatchObject({
+    phase: "failed",
+    failureCode: "resume_failed",
+  });
+});
+
+test("records cancellation uncertainty when the successor stop is refused", async () => {
+  const f = await fixture({ failStop: true });
+  await f.service.rotate(request(f));
+  await f.service.waitForOperation(operationId);
+  await expect(f.service.cancel(operationId)).resolves.toMatchObject({
+    accepted: false,
+    operation: { state: "cancel_uncertain" },
+  });
+  await expect(f.service.inspect(operationId)).resolves.toMatchObject({
+    phase: "failed",
+    failureCode: "cancel_uncertain",
+  });
 });

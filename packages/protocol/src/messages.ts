@@ -245,6 +245,8 @@ export const MutableDaemonConfigSchema = z
     metadataGeneration: MutableMetadataGenerationConfigSchema.default({ providers: [] }),
     autoArchiveAfterMerge: z.boolean().default(false),
     enableTerminalAgentHooks: z.boolean().default(false),
+    // Disabled until a host explicitly opts in: this operation fences and archives agents.
+    enableNativeSeatRotation: z.boolean().default(false),
     appendSystemPrompt: z.string().default(""),
     terminalProfiles: z.array(TerminalProfileSchema).optional(),
     agentProfiles: z.array(AgentProfileSchema).optional(),
@@ -266,6 +268,7 @@ export const MutableDaemonConfigPatchSchema = z
     metadataGeneration: MutableMetadataGenerationConfigSchema.partial().optional(),
     autoArchiveAfterMerge: z.boolean().optional(),
     enableTerminalAgentHooks: z.boolean().optional(),
+    enableNativeSeatRotation: z.boolean().optional(),
     appendSystemPrompt: z.string().optional(),
     terminalProfiles: z.array(TerminalProfileSchema).optional(),
     agentProfiles: z.array(AgentProfileSchema).optional(),
@@ -1980,6 +1983,8 @@ export const AgentSeatRotationCancelRequestMessageSchema = z.object({
   type: z.literal("agent.seat_rotation.cancel.request"),
   requestId: z.string(),
   operationId: z.string().uuid(),
+  // COMPAT(nativeSeatRotationPreJournalStop): optional while older clients retain operation-only Stop.
+  predecessorId: z.string().uuid().optional(),
 });
 
 export const AgentSeatRotationCancelResponseMessageSchema = z.object({
@@ -2004,6 +2009,28 @@ export const AgentSeatRotationInspectResponseMessageSchema = z.object({
   payload: z.object({
     requestId: z.string(),
     operationId: z.string().uuid(),
+    phase: z.enum(["pending", "succeeded", "failed"]).nullable(),
+    successorId: z.string().uuid().nullable(),
+    workspaceId: z.string().nullable(),
+    sourceRevision: z.string().nullable(),
+    revision: z.number().int().nonnegative().nullable(),
+    failureCode: z.string().nullable(),
+    error: z.string().nullable(),
+  }),
+});
+
+// COMPAT(nativeSeatRotationPredecessorLookup): added in v0.8.0; old hosts ignore this gated request.
+export const AgentSeatRotationPredecessorInspectRequestMessageSchema = z.object({
+  type: z.literal("agent.seat_rotation.predecessor.inspect.request"),
+  requestId: z.string(),
+  predecessorId: z.string().uuid(),
+});
+
+export const AgentSeatRotationPredecessorInspectResponseMessageSchema = z.object({
+  type: z.literal("agent.seat_rotation.predecessor.inspect.response"),
+  payload: z.object({
+    requestId: z.string(),
+    operationId: z.string().uuid().nullable(),
     phase: z.enum(["pending", "succeeded", "failed"]).nullable(),
     successorId: z.string().uuid().nullable(),
     workspaceId: z.string().nullable(),
@@ -3236,6 +3263,7 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   AgentSeatRotationRequestMessageSchema,
   AgentSeatRotationCancelRequestMessageSchema,
   AgentSeatRotationInspectRequestMessageSchema,
+  AgentSeatRotationPredecessorInspectRequestMessageSchema,
   AgentRewindRequestMessageSchema,
   AgentPermissionResponseMessageSchema,
   CheckoutStatusRequestSchema,
@@ -6646,6 +6674,7 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   AgentSeatRotationResponseMessageSchema,
   AgentSeatRotationCancelResponseMessageSchema,
   AgentSeatRotationInspectResponseMessageSchema,
+  AgentSeatRotationPredecessorInspectResponseMessageSchema,
   AgentRewindResponseMessageSchema,
   UpdateAgentResponseMessageSchema,
   ProjectRenameResponseSchema,
@@ -6852,6 +6881,9 @@ export type AgentSeatRotationCancelResponseMessage = z.infer<
 >;
 export type AgentSeatRotationInspectResponseMessage = z.infer<
   typeof AgentSeatRotationInspectResponseMessageSchema
+>;
+export type AgentSeatRotationPredecessorInspectResponseMessage = z.infer<
+  typeof AgentSeatRotationPredecessorInspectResponseMessageSchema
 >;
 export type AgentRewindResponseMessage = z.infer<typeof AgentRewindResponseMessageSchema>;
 export type UpdateAgentResponseMessage = z.infer<typeof UpdateAgentResponseMessageSchema>;

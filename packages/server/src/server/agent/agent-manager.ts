@@ -707,6 +707,9 @@ export class AgentManager {
   private readonly agents = new Map<string, LiveManagedAgent>();
   private readonly timelineStore = new InMemoryAgentTimelineStore();
   private readonly providerSubagents = new ProviderSubagentStore();
+  private nativeSeatRotationAdmissionLookup:
+    | ((agentId: string) => NativeSeatRotationAdmission | null)
+    | null = null;
   private readonly agentsAwaitingInitialSnapshotPersist = new Set<string>();
   private readonly sessionEventTails = new Map<string, Promise<void>>();
   private readonly steerEventBarriers = new Map<string, SteerEventBarrier>();
@@ -1192,6 +1195,16 @@ export class AgentManager {
   getNativeSeatRotationAdmission(agentId: string): NativeSeatRotationAdmission | null {
     const admission = this.nativeSeatRotationAdmissions.get(agentId);
     return admission ? { ...admission } : null;
+  }
+
+  /**
+   * The rotation coordinator persists a generation receipt. Consult it at each
+   * provider-write boundary so a daemon restart cannot reopen a fenced seat.
+   */
+  setNativeSeatRotationAdmissionLookup(
+    lookup: (agentId: string) => NativeSeatRotationAdmission | null,
+  ): void {
+    this.nativeSeatRotationAdmissionLookup = lookup;
   }
 
   async waitForAgentClose(agentId: string): Promise<void> {
@@ -2808,7 +2821,10 @@ export class AgentManager {
   }
 
   private assertNativeSeatRotationAllowsPrompt(agentId: string): void {
-    const admission = this.nativeSeatRotationAdmissions.get(agentId);
+    const admission =
+      this.nativeSeatRotationAdmissions.get(agentId) ??
+      this.nativeSeatRotationAdmissionLookup?.(agentId) ??
+      null;
     if (admission) {
       throw new Error(
         `Agent ${agentId} is reserved by native rotation ${admission.operationId} for generation ${admission.generation}`,

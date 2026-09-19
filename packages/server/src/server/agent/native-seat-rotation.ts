@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { promises as fs } from "node:fs";
+import { promises as fs, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
@@ -37,8 +37,11 @@ const JournalSchema = z.object({
     "archived",
     "resume_uncertain",
     "resume_started",
+    "resumed",
+    "resume_failed",
     "cancelled",
     "cancelled_after_fence",
+    "cancel_uncertain",
     "blocked",
   ]),
   successorId: z.string().uuid().optional(),
@@ -61,6 +64,11 @@ export interface NativeSeatRotationRequest {
 export interface NativeSeatRotationResult {
   accepted: boolean;
   operation: NativeSeatRotationJournal;
+}
+
+export interface NativeSeatRotationCancelResult {
+  accepted: boolean;
+  operation: NativeSeatRotationJournal | null;
 }
 
 export interface NativeSeatRotationClientState {
@@ -87,6 +95,8 @@ interface ValidatedCheckpoint {
  */
 export class NativeSeatRotationService {
   private readonly resumeTails = new Map<string, Promise<void>>();
+  /** Covers the pre-journal window for a normal predecessor Stop in this daemon. */
+  private readonly predecessorOperations = new Map<string, string>();
   /**
    * Serialises admission and Stop for one durable operation. The cancellation
    * file remains the crash-safe latch; this tail prevents Stop from releasing
@@ -99,26 +109,47 @@ export class NativeSeatRotationService {
       paseoHome: string;
       agentManager: AgentManager;
       agentStorage: AgentStorage;
+      isEnabled?: () => boolean;
     },
-  ) {}
+  ) {
+    this.options.agentManager.setNativeSeatRotationAdmissionLookup((agentId) =>
+      this.getDurableAdmission(agentId),
+    );
+  }
+
+  isEnabled(): boolean {
+    return this.options.isEnabled?.() === true;
+  }
 
   async rotate(request: NativeSeatRotationRequest): Promise<NativeSeatRotationResult> {
-    return await this.withOperationLock(
-      request.operationId,
-      async () => await this.rotateUnlocked(request),
-    );
+    this.predecessorOperations.set(request.predecessorId, request.operationId);
+    try {
+      return await this.withOperationLock(
+        request.operationId,
+        async () => await this.rotateUnlocked(request),
+      );
+    } catch (error) {
+      if (!(await this.read(request.operationId))) {
+        this.predecessorOperations.delete(request.predecessorId);
+      }
+      throw error;
+    }
   }
 
   private async rotateUnlocked(
     request: NativeSeatRotationRequest,
   ): Promise<NativeSeatRotationResult> {
+    if (!this.isEnabled())
+      throw new Error("native seat rotation is disabled by daemon configuration");
     const fingerprint = digest(request);
     const existing = await this.read(request.operationId);
     if (existing) {
       if (existing.fingerprint !== fingerprint)
         throw new Error("rotation operation fingerprint mismatch");
       return {
-        accepted: ["archived", "resume_uncertain", "resume_started"].includes(existing.state),
+        accepted: ["archived", "resume_uncertain", "resume_started", "resumed"].includes(
+          existing.state,
+        ),
         operation: existing,
       };
     }
@@ -145,6 +176,10 @@ export class NativeSeatRotationService {
       updatedAt: new Date().toISOString(),
     });
 
+    if (await this.isCancelledFor(request.operationId, request.predecessorId)) {
+      return await this.stopBeforeArchive(journal);
+    }
+
     try {
       this.options.agentManager.beginNativeSeatRotationAdmission(request.predecessorId, {
         operationId: request.operationId,
@@ -157,6 +192,20 @@ export class NativeSeatRotationService {
     journal = await this.write({ ...journal, state: "admitted" });
 
     try {
+      // validateCheckpoint reads the real repository and checkpoint after the
+      // manager fence, not only before it. Provider work can complete while the
+      // first validation is awaiting git/filesystem reads.
+      const revalidatedPredecessor = this.options.agentManager.getAgent(request.predecessorId);
+      if (!revalidatedPredecessor || revalidatedPredecessor.lifecycle === "closed") {
+        throw new Error("rotation predecessor changed before successor preparation");
+      }
+      const revalidatedCheckpoint = await this.validateCheckpoint(request, revalidatedPredecessor);
+      this.assertPredecessorUnchanged(
+        predecessor,
+        revalidatedPredecessor,
+        checkpoint,
+        revalidatedCheckpoint,
+      );
       const successorId = randomUUID();
       // Persist the successor identity before createSession. If the process dies
       // after a provider acknowledgement, recovery can inspect this one ID and
@@ -174,14 +223,26 @@ export class NativeSeatRotationService {
       );
       this.assertPreparedSuccessor({ predecessor, successor, checkpoint });
 
-      if (await this.isCancelled(request.operationId)) {
+      if (await this.isCancelledFor(request.operationId, request.predecessorId)) {
         return await this.stopBeforeArchive(journal);
       }
+
+      const beforeArchive = this.options.agentManager.getAgent(request.predecessorId);
+      if (!beforeArchive || beforeArchive.lifecycle === "closed") {
+        throw new Error("rotation predecessor changed before archive");
+      }
+      const checkpointBeforeArchive = await this.validateCheckpoint(request, beforeArchive);
+      this.assertPredecessorUnchanged(
+        predecessor,
+        beforeArchive,
+        checkpoint,
+        checkpointBeforeArchive,
+      );
 
       await this.options.agentManager.archiveAgent(request.predecessorId);
       journal = await this.write({ ...journal, state: "archived" });
 
-      if (await this.isCancelled(request.operationId)) {
+      if (await this.isCancelledFor(request.operationId, request.predecessorId)) {
         return await this.stopAfterFence(journal);
       }
 
@@ -212,14 +273,27 @@ export class NativeSeatRotationService {
     }
   }
 
-  async cancel(operationId: string): Promise<NativeSeatRotationResult> {
+  async cancel(
+    operationId: string,
+    predecessorId?: string,
+  ): Promise<NativeSeatRotationCancelResult> {
     // Latch synchronously with the caller, before waiting for an in-flight
     // rotate. rotate re-reads this durable marker at both irreversible edges.
-    await this.requireJournal(operationId);
+    const existing = await this.read(operationId);
+    if (existing && predecessorId && existing.predecessorId !== predecessorId) {
+      throw new Error("rotation cancellation predecessor does not match the operation");
+    }
+    if (!existing && !predecessorId) {
+      throw new Error(
+        "rotation operation is unknown; predecessor binding is required before admission",
+      );
+    }
     await writeJsonDurably(this.cancellationPath(operationId), {
       operationId,
+      predecessorId: predecessorId ?? existing!.predecessorId,
       requestedAt: new Date(),
     });
+    if (!existing) return { accepted: true, operation: null };
     return await this.withOperationLock(
       operationId,
       async () => await this.cancelUnlocked(operationId),
@@ -233,12 +307,23 @@ export class NativeSeatRotationService {
     }
     await writeJsonDurably(this.cancellationPath(operationId), {
       operationId,
+      predecessorId: journal.predecessorId,
       requestedAt: new Date(),
     });
     if (["requested", "admitted", "prepared"].includes(journal.state)) {
       return await this.stopBeforeArchive(journal);
     }
     return await this.stopAfterFence(journal);
+  }
+
+  async cancelForPredecessor(
+    predecessorId: string,
+  ): Promise<NativeSeatRotationCancelResult | null> {
+    const pendingOperationId = this.predecessorOperations.get(predecessorId);
+    if (pendingOperationId) return await this.cancel(pendingOperationId, predecessorId);
+    const state = await this.inspectByPredecessor(predecessorId);
+    if (!state) return null;
+    return await this.cancel(state.operationId, predecessorId);
   }
 
   async read(operationId: string): Promise<NativeSeatRotationJournal | null> {
@@ -257,6 +342,31 @@ export class NativeSeatRotationService {
     return journal ? clientState(journal) : null;
   }
 
+  /** Lookup is intentionally by predecessor so an app reconnect can recover an
+   * operation ID after its local optimistic state was lost. */
+  async inspectByPredecessor(predecessorId: string): Promise<NativeSeatRotationClientState | null> {
+    const directory = path.join(this.options.paseoHome, "seat-rotations", "operations");
+    let entries: string[];
+    try {
+      entries = await fs.readdir(directory);
+    } catch (error) {
+      if (isNotFound(error)) return null;
+      throw error;
+    }
+    const candidates = await Promise.all(
+      entries
+        .filter((entry) => entry.endsWith(".json"))
+        .map((entry) => this.read(entry.slice(0, -5))),
+    );
+    const journal = candidates
+      .filter(
+        (candidate): candidate is NativeSeatRotationJournal =>
+          candidate?.predecessorId === predecessorId,
+      )
+      .sort((a, b) => b.revision - a.revision || b.updatedAt.localeCompare(a.updatedAt))[0];
+    return journal ? clientState(journal) : null;
+  }
+
   async waitForOperation(operationId: string): Promise<void> {
     await this.resumeTails.get(operationId);
   }
@@ -265,24 +375,49 @@ export class NativeSeatRotationService {
     stream: AsyncGenerator<unknown>,
     journal: NativeSeatRotationJournal,
   ): Promise<void> {
+    let completed = false;
     try {
-      for await (const _event of stream) {
+      for await (const event of stream) {
         // AgentManager owns stream fan-out and durable timeline writes.
+        if (isTurnCompleted(event)) completed = true;
       }
-      if (!(await this.isCancelled(journal.operationId))) {
-        await this.write({ ...journal, state: "resume_started" });
-      }
+      await this.withOperationLock(journal.operationId, async () => {
+        const latest = await this.requireJournal(journal.operationId);
+        if (await this.isCancelledFor(journal.operationId, journal.predecessorId)) return;
+        if (completed) {
+          await this.write({ ...latest, state: "resumed", error: undefined });
+          return;
+        }
+        await this.write({
+          ...latest,
+          state: "resume_failed",
+          error: "successor resume ended before established liveness",
+        });
+      });
     } catch (error) {
-      if (!(await this.isCancelled(journal.operationId))) {
-        await this.write({ ...journal, state: "blocked", error: errorMessage(error) });
-      }
+      await this.withOperationLock(journal.operationId, async () => {
+        if (await this.isCancelledFor(journal.operationId, journal.predecessorId)) return;
+        const latest = await this.requireJournal(journal.operationId);
+        await this.write({ ...latest, state: "resume_failed", error: errorMessage(error) });
+      });
     }
   }
 
   private async stopBeforeArchive(
     journal: NativeSeatRotationJournal,
   ): Promise<NativeSeatRotationResult> {
-    if (journal.successorId) await this.options.agentManager.closeAgent(journal.successorId);
+    try {
+      if (journal.successorId) await this.options.agentManager.closeAgent(journal.successorId);
+    } catch (error) {
+      return {
+        accepted: false,
+        operation: await this.write({
+          ...journal,
+          state: "cancel_uncertain",
+          error: errorMessage(error),
+        }),
+      };
+    }
     this.options.agentManager.endNativeSeatRotationAdmission(
       journal.predecessorId,
       journal.operationId,
@@ -293,9 +428,20 @@ export class NativeSeatRotationService {
   private async stopAfterFence(
     journal: NativeSeatRotationJournal,
   ): Promise<NativeSeatRotationResult> {
-    if (journal.successorId) {
-      await this.options.agentManager.cancelAgentRun(journal.successorId).catch(() => undefined);
-      await this.options.agentManager.closeAgent(journal.successorId).catch(() => undefined);
+    try {
+      if (journal.successorId) {
+        await this.options.agentManager.cancelAgentRun(journal.successorId);
+        await this.options.agentManager.closeAgent(journal.successorId);
+      }
+    } catch (error) {
+      return {
+        accepted: false,
+        operation: await this.write({
+          ...journal,
+          state: "cancel_uncertain",
+          error: errorMessage(error),
+        }),
+      };
     }
     return {
       accepted: false,
@@ -358,6 +504,67 @@ export class NativeSeatRotationService {
     }
   }
 
+  private assertPredecessorUnchanged(
+    initial: ManagedAgent,
+    current: ManagedAgent,
+    initialCheckpoint: ValidatedCheckpoint,
+    currentCheckpoint: ValidatedCheckpoint,
+  ): void {
+    if (
+      initial.id !== current.id ||
+      initial.persistence?.sessionId !== current.persistence?.sessionId ||
+      initial.cwd !== current.cwd ||
+      initialCheckpoint.repoPath !== currentCheckpoint.repoPath ||
+      initialCheckpoint.checkpointPath !== currentCheckpoint.checkpointPath ||
+      initialCheckpoint.checkpointHash !== currentCheckpoint.checkpointHash ||
+      initialCheckpoint.checkpoint.sourceRevision !== currentCheckpoint.checkpoint.sourceRevision
+    ) {
+      throw new Error(
+        "rotation source, checkpoint, or predecessor session changed after admission",
+      );
+    }
+  }
+
+  private getDurableAdmission(agentId: string): { operationId: string; generation: number } | null {
+    const directory = path.join(this.options.paseoHome, "seat-rotations", "admissions");
+    let entries: string[];
+    try {
+      entries = readdirSync(directory);
+    } catch (error) {
+      if (isNotFound(error)) return null;
+      throw error;
+    }
+    for (const entry of entries) {
+      if (!entry.startsWith(`${agentId}.`) || !entry.endsWith(".lock")) continue;
+      try {
+        const owner = JSON.parse(
+          readFileSync(path.join(directory, entry, "owner.json"), "utf8"),
+        ) as {
+          operationId?: string;
+          generation?: number;
+        };
+        const generation =
+          Number.isInteger(owner.generation) && (owner.generation ?? 0) > 0
+            ? owner.generation!
+            : null;
+        if (!owner.operationId || generation === null) continue;
+        const journal = JSON.parse(
+          readFileSync(this.operationPath(owner.operationId), "utf8"),
+        ) as NativeSeatRotationJournal;
+        if (journal.predecessorId !== agentId || journal.state === "cancelled") continue;
+        return { operationId: owner.operationId, generation };
+      } catch {
+        // A torn/missing receipt is a fence, never permission to write.
+        const generation = Number(entry.slice(agentId.length + 1, -".lock".length));
+        return {
+          operationId: "durable-receipt-unreadable",
+          generation: Number.isSafeInteger(generation) ? generation : 1,
+        };
+      }
+    }
+    return null;
+  }
+
   private async claimGeneration(request: NativeSeatRotationRequest): Promise<void> {
     const directory = this.generationLockPath(request.predecessorId, request.generation);
     await fs.mkdir(path.dirname(directory), { recursive: true, mode: 0o700 });
@@ -383,11 +590,20 @@ export class NativeSeatRotationService {
     }
   }
 
-  private async isCancelled(operationId: string): Promise<boolean> {
-    return await fs
-      .access(this.cancellationPath(operationId))
-      .then(() => true)
-      .catch(() => false);
+  private async isCancelledFor(operationId: string, predecessorId: string): Promise<boolean> {
+    try {
+      const value = JSON.parse(await fs.readFile(this.cancellationPath(operationId), "utf8")) as {
+        operationId?: string;
+        predecessorId?: string;
+      };
+      if (value.operationId !== operationId || value.predecessorId !== predecessorId) {
+        throw new Error("rotation cancellation intent does not match the operation");
+      }
+      return true;
+    } catch (error) {
+      if (isNotFound(error)) return false;
+      throw error;
+    }
   }
 
   private async requireJournal(operationId: string): Promise<NativeSeatRotationJournal> {
@@ -533,8 +749,14 @@ function errorMessage(error: unknown): string {
 }
 
 function clientState(journal: NativeSeatRotationJournal): NativeSeatRotationClientState {
-  const succeeded = ["archived", "resume_uncertain", "resume_started"].includes(journal.state);
-  const failed = ["blocked", "cancelled", "cancelled_after_fence"].includes(journal.state);
+  const succeeded = journal.state === "resumed";
+  const failed = [
+    "blocked",
+    "resume_failed",
+    "cancelled",
+    "cancelled_after_fence",
+    "cancel_uncertain",
+  ].includes(journal.state);
   let phase: NativeSeatRotationClientState["phase"] = "pending";
   if (succeeded) phase = "succeeded";
   if (failed) phase = "failed";
@@ -548,4 +770,13 @@ function clientState(journal: NativeSeatRotationJournal): NativeSeatRotationClie
     // Do not return provider or filesystem errors to another client.
     failureCode: failed ? journal.state : null,
   };
+}
+
+function isTurnCompleted(event: unknown): boolean {
+  return (
+    typeof event === "object" &&
+    event !== null &&
+    "type" in event &&
+    event.type === "turn_completed"
+  );
 }

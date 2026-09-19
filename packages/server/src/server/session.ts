@@ -465,6 +465,8 @@ export interface SessionOptions {
   worktreesRoot?: string;
   agentManager: AgentManager;
   agentStorage: AgentStorage;
+  /** Daemon-owned: all socket sessions must share one operation coordinator. */
+  nativeSeatRotation: NativeSeatRotationService;
   agentRequests: Pick<AgentRequests, "create" | "send">;
   projectRegistry: ProjectRegistry;
   workspaceRegistry: WorkspaceRegistry;
@@ -831,11 +833,7 @@ export class Session {
     this.pushNotifications = pushNotifications;
     this.paseoHome = paseoHome;
     this.agentRequests = options.agentRequests;
-    this.nativeSeatRotation = new NativeSeatRotationService({
-      paseoHome,
-      agentManager,
-      agentStorage,
-    });
+    this.nativeSeatRotation = options.nativeSeatRotation;
     this.projectIcons = new ProjectIconReader(paseoHome);
     this.worktreesRoot = worktreesRoot;
     this.pluginRuntime = pluginRuntime;
@@ -2446,6 +2444,8 @@ export class Session {
         return this.handleAgentSeatRotationCancelRequest(msg);
       case "agent.seat_rotation.inspect.request":
         return this.handleAgentSeatRotationInspectRequest(msg);
+      case "agent.seat_rotation.predecessor.inspect.request":
+        return this.handleAgentSeatRotationPredecessorInspectRequest(msg);
       default:
         return undefined;
     }
@@ -4056,6 +4056,21 @@ export class Session {
     this.sessionLogger.info({ agentId }, `Cancel request received for agent ${agentId}`);
 
     try {
+      const rotationStop = await this.nativeSeatRotation.cancelForPredecessor(agentId);
+      if (rotationStop) {
+        if (rotationStop.operation?.state === "cancel_uncertain") {
+          throw new Error("native rotation Stop is uncertain and remains recoverable");
+        }
+        if (requestId) {
+          const agent = this.agentManager.getAgent(agentId);
+          const payload = agent ? await this.buildAgentPayload(agent) : null;
+          this.emit({
+            type: "cancel_agent_response",
+            payload: { requestId, agentId, agent: payload, error: null },
+          });
+        }
+        return;
+      }
       await cancelAgentRunCommand(
         { agentManager: this.agentManager, logger: this.sessionLogger },
         agentId,
@@ -7714,14 +7729,20 @@ export class Session {
     msg: Extract<SessionInboundMessage, { type: "agent.seat_rotation.cancel.request" }>,
   ): Promise<void> {
     try {
-      const result = await this.nativeSeatRotation.cancel(msg.operationId);
+      if (msg.predecessorId) {
+        const resolved = await this.resolveAgentIdentifier(msg.predecessorId);
+        if (!resolved.ok || resolved.agentId !== msg.predecessorId) {
+          throw new Error("rotation predecessor is unknown");
+        }
+      }
+      const result = await this.nativeSeatRotation.cancel(msg.operationId, msg.predecessorId);
       this.emit({
         type: "agent.seat_rotation.cancel.response",
         payload: {
           requestId: msg.requestId,
           accepted: result.accepted,
-          state: result.operation.state,
-          successorId: result.operation.successorId ?? null,
+          state: result.operation?.state ?? "cancel_intent",
+          successorId: result.operation?.successorId ?? null,
           error: null,
         },
       });
@@ -7764,6 +7785,50 @@ export class Session {
         payload: {
           requestId: msg.requestId,
           operationId: msg.operationId,
+          phase: null,
+          successorId: null,
+          workspaceId: null,
+          sourceRevision: null,
+          revision: null,
+          failureCode: null,
+          error: errorToFriendlyMessage(error),
+        },
+      });
+    }
+  }
+
+  private async handleAgentSeatRotationPredecessorInspectRequest(
+    msg: Extract<
+      SessionInboundMessage,
+      { type: "agent.seat_rotation.predecessor.inspect.request" }
+    >,
+  ): Promise<void> {
+    try {
+      const resolved = await this.resolveAgentIdentifier(msg.predecessorId);
+      if (!resolved.ok || resolved.agentId !== msg.predecessorId) {
+        throw new Error("rotation predecessor is unknown");
+      }
+      const state = await this.nativeSeatRotation.inspectByPredecessor(msg.predecessorId);
+      this.emit({
+        type: "agent.seat_rotation.predecessor.inspect.response",
+        payload: {
+          requestId: msg.requestId,
+          operationId: state?.operationId ?? null,
+          phase: state?.phase ?? null,
+          successorId: state?.successorId ?? null,
+          workspaceId: state?.workspaceId ?? null,
+          sourceRevision: state?.sourceRevision ?? null,
+          revision: state?.revision ?? null,
+          failureCode: state?.failureCode ?? null,
+          error: null,
+        },
+      });
+    } catch (error) {
+      this.emit({
+        type: "agent.seat_rotation.predecessor.inspect.response",
+        payload: {
+          requestId: msg.requestId,
+          operationId: null,
           phase: null,
           successorId: null,
           workspaceId: null,

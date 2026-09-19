@@ -1,4 +1,5 @@
 import { AgentRequests } from "./agent/requests/index.js";
+import { NativeSeatRotationService } from "./agent/native-seat-rotation.js";
 import { WebSocket, WebSocketServer } from "ws";
 import type { IncomingMessage, Server as HTTPServer } from "http";
 import { join } from "path";
@@ -603,6 +604,7 @@ export class VoiceAssistantWebSocketServer {
   private readonly directorySync = new DirectorySyncService();
   private readonly pluginRuntime: SessionOptions["pluginRuntime"];
   private readonly orchestrationSkills: SessionOptions["orchestrationSkills"];
+  private readonly nativeSeatRotation: NativeSeatRotationService;
 
   constructor(
     server: HTTPServer,
@@ -668,6 +670,12 @@ export class VoiceAssistantWebSocketServer {
     this.orchestrationSkills = orchestrationSkills;
     this.agentManager = agentManager;
     this.agentStorage = agentStorage;
+    this.nativeSeatRotation = new NativeSeatRotationService({
+      paseoHome,
+      agentManager,
+      agentStorage,
+      isEnabled: () => daemonConfigStore.get().enableNativeSeatRotation === true,
+    });
     this.agentRequests = new AgentRequests(join(paseoHome, "agent-requests"));
     this.projectRegistry = projectRegistry ?? createNoopProjectRegistry();
     this.workspaceRegistry = workspaceRegistry ?? createNoopWorkspaceRegistry();
@@ -1412,6 +1420,7 @@ export class VoiceAssistantWebSocketServer {
       worktreesRoot: this.worktreesRoot,
       agentManager: this.agentManager,
       agentStorage: this.agentStorage,
+      nativeSeatRotation: this.nativeSeatRotation,
       agentRequests: this.agentRequests,
       projectRegistry: this.projectRegistry,
       workspaceRegistry: this.workspaceRegistry,
@@ -1634,7 +1643,7 @@ export class VoiceAssistantWebSocketServer {
       features: {
         agentRequestReceipts: true,
         // COMPAT(nativeSeatRotation): added in v0.8.0; remove gate after 2027-09-19.
-        nativeSeatRotation: true,
+        nativeSeatRotation: this.nativeSeatRotation.isEnabled(),
         hubAgentRpc: true,
         // COMPAT(directorySync): added in v0.3.x, remove gate after 2027-02-12.
         directorySync: true,

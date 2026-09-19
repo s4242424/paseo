@@ -19,6 +19,14 @@ must wait for its normal agent snapshot before retargeting. `pending` and
 predecessor. No labels, archive calls, checkpoint contents or provider session
 identifiers are client inputs to this continuity path.
 
+Native rotation is disabled unless `daemon.enableNativeSeatRotation` is true.
+The daemon advertises the capability only when that setting is enabled. The
+separate `inspectAgentSeatRotationPredecessor(predecessorId)` client method is
+for callers that retained the predecessor identity rather than an operation
+ID. Its snapshot links `operationId`, `phase`, `successorId`, `workspaceId`,
+`sourceRevision`, `revision`, and `failureCode`; it is not a replacement for
+the operation-ID receipt during an active transition.
+
 ## Contract
 
 `SeatRotationCore` accepts an injected backend with these operations:

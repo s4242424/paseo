@@ -2688,7 +2688,10 @@ export class DaemonClient {
     };
   }
 
-  async cancelAgentSeatRotation(operationId: string): Promise<{
+  async cancelAgentSeatRotation(
+    operationId: string,
+    predecessorId?: string,
+  ): Promise<{
     accepted: boolean;
     state: string | null;
     successorId: string | null;
@@ -2698,7 +2701,7 @@ export class DaemonClient {
     }
     const payload =
       await this.sendNamespacedCorrelatedSessionRequest<"agent.seat_rotation.cancel.response">({
-        message: { type: "agent.seat_rotation.cancel.request", operationId },
+        message: { type: "agent.seat_rotation.cancel.request", operationId, predecessorId },
       });
     if (!payload.accepted)
       throw new Error(payload.error ?? "Native seat rotation cancellation failed.");
@@ -2725,6 +2728,36 @@ export class DaemonClient {
       await this.sendNamespacedCorrelatedSessionRequest<"agent.seat_rotation.inspect.response">({
         message: { type: "agent.seat_rotation.inspect.request", operationId },
       });
+    if (payload.error) throw new Error(payload.error);
+    return {
+      operationId: payload.operationId,
+      phase: payload.phase,
+      successorId: payload.successorId,
+      workspaceId: payload.workspaceId,
+      sourceRevision: payload.sourceRevision,
+      revision: payload.revision,
+      failureCode: payload.failureCode,
+    };
+  }
+
+  async inspectAgentSeatRotationByPredecessor(predecessorId: string): Promise<{
+    operationId: string | null;
+    phase: "pending" | "succeeded" | "failed" | null;
+    successorId: string | null;
+    workspaceId: string | null;
+    sourceRevision: string | null;
+    revision: number | null;
+    failureCode: string | null;
+  }> {
+    if (this.lastServerInfoMessage?.features?.nativeSeatRotation !== true) {
+      throw new Error("Update the host to inspect native seat rotation.");
+    }
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"agent.seat_rotation.predecessor.inspect.response">(
+        {
+          message: { type: "agent.seat_rotation.predecessor.inspect.request", predecessorId },
+        },
+      );
     if (payload.error) throw new Error(payload.error);
     return {
       operationId: payload.operationId,
