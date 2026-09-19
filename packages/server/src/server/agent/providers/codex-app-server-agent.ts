@@ -2160,7 +2160,8 @@ const TurnDiffUpdatedNotificationSchema = z
 
 const ThreadTokenUsageUpdatedNotificationSchema = z
   .object({
-    threadId: z.string().optional(),
+    threadId: z.string(),
+    turnId: z.string(),
     tokenUsage: z.unknown(),
   })
   .passthrough();
@@ -2425,7 +2426,7 @@ type ParsedCodexNotification =
       threadId: string | null;
     }
   | { kind: "diff_updated"; diff: string; threadId: string | null }
-  | { kind: "token_usage_updated"; tokenUsage: unknown; threadId: string | null }
+  | { kind: "token_usage_updated"; tokenUsage: unknown; threadId: string; turnId: string }
   | { kind: "agent_message_delta"; itemId: string; delta: string; threadId: string | null }
   | { kind: "reasoning_delta"; itemId: string; delta: string; threadId: string | null }
   | {
@@ -2623,7 +2624,8 @@ const CodexNotificationSchema = z.union([
       ({ params }): ParsedCodexNotification => ({
         kind: "token_usage_updated",
         tokenUsage: params.tokenUsage,
-        threadId: params.threadId ?? null,
+        threadId: params.threadId,
+        turnId: params.turnId,
       }),
     ),
   z.object({ method: z.literal("thread/tokenUsage/updated"), params: z.unknown() }).transform(
@@ -6019,17 +6021,41 @@ export class CodexAppServerAgentSession implements AgentSession {
   private handleTokenUsageUpdatedNotification(
     parsed: Extract<ParsedCodexNotification, { kind: "token_usage_updated" }>,
   ): void {
-    if (parsed.threadId && parsed.threadId !== this.currentThreadId) {
+    if (
+      !this.currentThreadId ||
+      !this.currentTurnId ||
+      !this.activeForegroundTurnId ||
+      parsed.threadId !== this.currentThreadId ||
+      parsed.turnId !== this.currentTurnId
+    ) {
       this.logger.debug(
-        { eventThreadId: parsed.threadId, currentThreadId: this.currentThreadId },
-        "Ignoring Codex token usage from a non-current thread",
+        {
+          eventThreadId: parsed.threadId,
+          eventTurnId: parsed.turnId,
+          currentThreadId: this.currentThreadId,
+          currentTurnId: this.currentTurnId,
+        },
+        "Ignoring Codex token usage without a current native thread and turn match",
       );
       return;
     }
-    // The app-server notification identifies a thread but not the native turn that produced
-    // the tuple. Keep its legacy fields for display, but do not bind them to the active turn or
-    // claim provider confirmation: a delayed previous-turn update is indistinguishable here.
-    this.latestUsage = toAgentUsage(parsed.tokenUsage);
+    const usage = toAgentUsage(parsed.tokenUsage);
+    if (!usage) return;
+    this.latestUsage = {
+      ...usage,
+      ...(usage.contextWindowUsedTokens !== undefined && usage.contextWindowMaxTokens !== undefined
+        ? {
+            contextWindowObservation: {
+              sessionId: this.currentThreadId,
+              turnId: this.activeForegroundTurnId,
+              observedAt: new Date().toISOString(),
+              contextWindowSource: "provider-confirmed" as const,
+              usedTokens: usage.contextWindowUsedTokens,
+              maxTokens: usage.contextWindowMaxTokens,
+            },
+          }
+        : {}),
+    };
     if (this.latestUsage) {
       this.notifySubscribers({
         type: "usage_updated",
