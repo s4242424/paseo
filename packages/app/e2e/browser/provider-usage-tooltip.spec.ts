@@ -2,6 +2,7 @@ import { expect, test, type Page } from "../support/fixtures";
 import { expectComposerVisible } from "../support/helpers/composer";
 import { openAgentRoute, seedMockAgentWorkspace } from "../support/helpers/mock-agent";
 import { installProviderUsageFixture } from "../support/helpers/provider-usage";
+import { ensureExplorerSidebar } from "../support/helpers/workspace-tabs";
 
 const MOBILE_VIEWPORT = { width: 390, height: 844 };
 const ACCOUNT_PLUGIN_ID = "provider-usage-account";
@@ -24,6 +25,55 @@ const ACCOUNT_PLUGIN_CATALOG = [
   {
     id: ACCOUNT_PLUGIN_ID,
     clientBundle: ACCOUNT_PLUGIN_BUNDLE,
+    requirements: { paseo: ">=0.8.0" },
+  },
+];
+const ACCOUNT_OBSERVER_PLUGIN_BUNDLE = `(function(require) {
+  const module = { exports: {} };
+  module.exports.default = function(plugin) {
+    const React = require("react");
+    const { Text } = require("react-native");
+    const { useRpc } = require("@getpaseo/plugin/client");
+    const { useQuery } = require("@tanstack/react-query");
+    const accountStatus = { name: "account.status" };
+    function AccountStatusObserver(props) {
+      const rpc = useRpc(accountStatus);
+      const query = useQuery({
+        queryKey: ["claude-host-account", props.host.id],
+        queryFn: () => rpc({}),
+        staleTime: 30000,
+      });
+      React.useEffect(() => {
+        const refresh = () => void query.refetch();
+        globalThis.addEventListener("provider-usage-test-refresh", refresh);
+        return () => globalThis.removeEventListener("provider-usage-test-refresh", refresh);
+      }, [query.refetch]);
+      return React.createElement(Text, { testID: "plugin-account-status-observer" }, "Account status observer");
+    }
+    function AccountPanel(props) { return "Account panel for " + props.agentId; }
+    plugin.addWorkspacePanel({
+      id: "status-observer",
+      title: "Status observer",
+      icon: "Blocks",
+      context: "workspace",
+      locations: ["explorer"],
+      Component: AccountStatusObserver,
+    });
+    plugin.addWorkspacePanel({
+      id: "account",
+      title: "Account",
+      icon: "Blocks",
+      context: "agent",
+      Component: AccountPanel,
+    });
+    return function() {};
+  };
+  return module.exports;
+})`;
+const ACCOUNT_OBSERVER_PLUGIN_CATALOG = [
+  {
+    id: ACCOUNT_PLUGIN_ID,
+    clientBundle: ACCOUNT_OBSERVER_PLUGIN_BUNDLE,
     requirements: { paseo: ">=0.8.0" },
   },
 ];
@@ -190,7 +240,9 @@ test.describe("provider usage tooltip", () => {
       await page.getByTestId("context-window-meter").click();
       await usageFixture.waitForRequestCount(1);
 
-      await expect(page.getByText("Signed out", { exact: true })).toBeVisible({ timeout: 10_000 });
+      await expect(page.getByText("Signed out", { exact: true })).toBeVisible({
+        timeout: 10_000,
+      });
       await expect(page.getByText("Account unknown", { exact: true })).toBeVisible();
       await expect(page.getByText("Unavailable", { exact: true })).toBeVisible();
       await expect(page.getByText("Error", { exact: true })).toBeVisible();
@@ -199,6 +251,76 @@ test.describe("provider usage tooltip", () => {
       await expect(page.getByText("stray-codex@example.test", { exact: true })).toHaveCount(0);
       await expect(page.getByText("Max 20x", { exact: true })).toHaveCount(0);
       await expect(page.getByText("Pro", { exact: true })).toHaveCount(0);
+    } finally {
+      await session.cleanup();
+    }
+  });
+
+  test("replaces the open popover account name after the selected plugin status query settles", async ({
+    page,
+  }) => {
+    test.setTimeout(180_000);
+    const accountStatuses = {
+      claude: { state: "oauth", email: "old@example.test" },
+      codex: { state: "chatgpt", email: "codex@example.test" },
+    };
+    const usageFixture = await installProviderUsageFixture(
+      page,
+      [
+        {
+          fetchedAt: "2026-06-19T00:00:00.000Z",
+          providers: [
+            {
+              providerId: "claude",
+              displayName: "Claude",
+              status: "available",
+              planLabel: null,
+              windows: [{ id: "session", label: "Session", usedPct: 25 }],
+            },
+            {
+              providerId: "codex",
+              displayName: "Codex",
+              status: "available",
+              planLabel: null,
+              windows: [{ id: "session", label: "Session", usedPct: 52 }],
+            },
+          ],
+        },
+      ],
+      { pluginCatalog: ACCOUNT_OBSERVER_PLUGIN_CATALOG, accountStatuses },
+    );
+    const session = await openMockAgent(page, { width: 1280, height: 800 });
+    try {
+      const explorer = await ensureExplorerSidebar(page);
+      await explorer.getByTestId("explorer-sidebar-tab-rail").click({
+        button: "right",
+        position: { x: 20, y: 2 },
+      });
+      const menu = page.getByTestId("explorer-sidebar-tab-configuration");
+      await menu.getByRole("menuitem", { name: "Status observer", exact: true }).click();
+      await expect(page.getByTestId("plugin-account-status-observer")).toBeVisible();
+
+      await page.getByTestId("context-window-meter").hover();
+      await usageFixture.waitForRequestCount(1);
+      await expect(page.getByText("old@example.test", { exact: true })).toBeVisible({
+        timeout: 10_000,
+      });
+
+      accountStatuses.claude.email = "new@example.test";
+      await page.evaluate(() => globalThis.dispatchEvent(new Event("provider-usage-test-refresh")));
+
+      await expect(page.getByText("new@example.test", { exact: true })).toBeVisible({
+        timeout: 10_000,
+      });
+      await expect(page.getByText("old@example.test", { exact: true })).toHaveCount(0);
+      expect(usageFixture.requestCount()).toBe(1);
+
+      await page.mouse.move(0, 0);
+      await expect(page.getByTestId("context-window-meter-popover")).not.toBeVisible();
+      await page.getByTestId("context-window-meter").hover();
+      await expect(page.getByText("new@example.test", { exact: true })).toBeVisible({
+        timeout: 10_000,
+      });
     } finally {
       await session.cleanup();
     }
