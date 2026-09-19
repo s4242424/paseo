@@ -1,5 +1,6 @@
 import { AgentRequests } from "./agent/requests/index.js";
 import { NativeSeatRotationService } from "./agent/native-seat-rotation.js";
+import { SeatRotationPolicy } from "./agent/seat-rotation-policy.js";
 import { WebSocket, WebSocketServer } from "ws";
 import type { IncomingMessage, Server as HTTPServer } from "http";
 import { join } from "path";
@@ -605,6 +606,7 @@ export class VoiceAssistantWebSocketServer {
   private readonly pluginRuntime: SessionOptions["pluginRuntime"];
   private readonly orchestrationSkills: SessionOptions["orchestrationSkills"];
   private readonly nativeSeatRotation: NativeSeatRotationService;
+  private readonly seatRotationPolicy: SeatRotationPolicy;
 
   constructor(
     server: HTTPServer,
@@ -676,6 +678,13 @@ export class VoiceAssistantWebSocketServer {
       agentStorage,
       isEnabled: () => daemonConfigStore.get().enableNativeSeatRotation === true,
     });
+    this.seatRotationPolicy = new SeatRotationPolicy({
+      paseoHome,
+      agentManager,
+      nativeSeatRotation: this.nativeSeatRotation,
+      readConfig: () => daemonConfigStore.get().seatRotationPolicy ?? { enabled: false, seats: [] },
+    });
+    this.seatRotationPolicy.start();
     this.agentRequests = new AgentRequests(join(paseoHome, "agent-requests"));
     this.projectRegistry = projectRegistry ?? createNoopProjectRegistry();
     this.workspaceRegistry = workspaceRegistry ?? createNoopWorkspaceRegistry();
@@ -1421,6 +1430,7 @@ export class VoiceAssistantWebSocketServer {
       agentManager: this.agentManager,
       agentStorage: this.agentStorage,
       nativeSeatRotation: this.nativeSeatRotation,
+      seatRotationPolicy: this.seatRotationPolicy,
       agentRequests: this.agentRequests,
       projectRegistry: this.projectRegistry,
       workspaceRegistry: this.workspaceRegistry,

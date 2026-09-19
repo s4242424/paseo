@@ -178,6 +178,7 @@ import type {
   AgentSkillSelection,
   FirstAgentContext,
   PluginSource,
+  SeatRotationPolicyConfig,
   TerminalProfile,
 } from "@getpaseo/protocol/messages";
 import type {
@@ -403,6 +404,7 @@ export interface PaseoDaemonConfig {
   autoArchiveAfterMerge?: boolean;
   enableTerminalAgentHooks?: boolean;
   enableNativeSeatRotation?: boolean;
+  seatRotationPolicy?: SeatRotationPolicyConfig;
   appendSystemPrompt?: string;
   terminalProfiles?: TerminalProfile[];
   agentProfiles?: AgentProfile[];
@@ -529,6 +531,10 @@ function resolveNativeSeatRotationEnabled(config: PaseoDaemonConfig): boolean {
   return config.enableNativeSeatRotation ?? false;
 }
 
+function resolveSeatRotationPolicyConfig(config: PaseoDaemonConfig): SeatRotationPolicyConfig {
+  return config.seatRotationPolicy ?? { enabled: false, seats: [] };
+}
+
 function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): MutableDaemonConfig {
   const providers = config.providerOverrides ?? {};
 
@@ -554,6 +560,7 @@ function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): MutableDae
     autoArchiveAfterMerge: config.autoArchiveAfterMerge ?? false,
     enableTerminalAgentHooks: config.enableTerminalAgentHooks ?? false,
     enableNativeSeatRotation: resolveNativeSeatRotationEnabled(config),
+    seatRotationPolicy: resolveSeatRotationPolicyConfig(config),
     appendSystemPrompt: config.appendSystemPrompt ?? "",
     pluginsEnabled: config.pluginsEnabled ?? false,
     plugins: config.plugins ?? {},

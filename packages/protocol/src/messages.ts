@@ -214,6 +214,24 @@ export const AgentSkillSelectionSchema = z.discriminatedUnion("mode", [
 ]);
 export type AgentSkillSelection = z.infer<typeof AgentSkillSelectionSchema>;
 
+const SeatRotationPolicySeatSchema = z
+  .object({
+    repositoryPath: z.string().min(1),
+    handoverRoot: z.string().min(1),
+    checkpointPath: z.string().min(1),
+    progressWitnessPath: z.string().min(1),
+    resumePrompt: z.string().min(1),
+  })
+  .strict();
+
+export const SeatRotationPolicyConfigSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    seats: z.array(SeatRotationPolicySeatSchema).default([]),
+  })
+  .strict();
+export type SeatRotationPolicyConfig = z.infer<typeof SeatRotationPolicyConfigSchema>;
+
 export const MutableDaemonConfigSchema = z
   .object({
     // COMPAT(relayConfig): added in v0.2.6, remove after 2027-01-31 when old daemons are unsupported.
@@ -247,6 +265,7 @@ export const MutableDaemonConfigSchema = z
     enableTerminalAgentHooks: z.boolean().default(false),
     // Disabled until a host explicitly opts in: this operation fences and archives agents.
     enableNativeSeatRotation: z.boolean().default(false),
+    seatRotationPolicy: SeatRotationPolicyConfigSchema.optional(),
     appendSystemPrompt: z.string().default(""),
     terminalProfiles: z.array(TerminalProfileSchema).optional(),
     agentProfiles: z.array(AgentProfileSchema).optional(),
@@ -269,6 +288,7 @@ export const MutableDaemonConfigPatchSchema = z
     autoArchiveAfterMerge: z.boolean().optional(),
     enableTerminalAgentHooks: z.boolean().optional(),
     enableNativeSeatRotation: z.boolean().optional(),
+    seatRotationPolicy: SeatRotationPolicyConfigSchema.partial().optional(),
     appendSystemPrompt: z.string().optional(),
     terminalProfiles: z.array(TerminalProfileSchema).optional(),
     agentProfiles: z.array(AgentProfileSchema).optional(),

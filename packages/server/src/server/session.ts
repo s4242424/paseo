@@ -1,6 +1,7 @@
 import type { SessionEventSubscription } from "@getpaseo/protocol/messages";
 import type { AgentRequests } from "./agent/requests/index.js";
 import { NativeSeatRotationService } from "./agent/native-seat-rotation.js";
+import { SeatRotationPolicy } from "./agent/seat-rotation-policy.js";
 import equal from "fast-deep-equal";
 import { v4 as uuidv4 } from "uuid";
 import { lstat, mkdir, mkdtemp, rename, rm, stat } from "node:fs/promises";
@@ -467,6 +468,7 @@ export interface SessionOptions {
   agentStorage: AgentStorage;
   /** Daemon-owned: all socket sessions must share one operation coordinator. */
   nativeSeatRotation: NativeSeatRotationService;
+  seatRotationPolicy: SeatRotationPolicy;
   agentRequests: Pick<AgentRequests, "create" | "send">;
   projectRegistry: ProjectRegistry;
   workspaceRegistry: WorkspaceRegistry;
@@ -759,6 +761,7 @@ export class Session {
   private readonly workspaceScripts: WorkspaceScriptsService;
   private readonly agentRequests: Pick<AgentRequests, "create" | "send">;
   private readonly nativeSeatRotation: NativeSeatRotationService;
+  private readonly seatRotationPolicy: SeatRotationPolicy;
   private readonly createAgentLifecycleDispatch: CreateAgentLifecycleDispatch;
 
   constructor(options: SessionOptions) {
@@ -834,6 +837,7 @@ export class Session {
     this.paseoHome = paseoHome;
     this.agentRequests = options.agentRequests;
     this.nativeSeatRotation = options.nativeSeatRotation;
+    this.seatRotationPolicy = options.seatRotationPolicy;
     this.projectIcons = new ProjectIconReader(paseoHome);
     this.worktreesRoot = worktreesRoot;
     this.pluginRuntime = pluginRuntime;
@@ -4056,6 +4060,18 @@ export class Session {
     this.sessionLogger.info({ agentId }, `Cancel request received for agent ${agentId}`);
 
     try {
+      const policyStop = await this.seatRotationPolicy.cancelForPredecessor(agentId);
+      if (policyStop) {
+        if (requestId) {
+          const agent = this.agentManager.getAgent(agentId);
+          const payload = agent ? await this.buildAgentPayload(agent) : null;
+          this.emit({
+            type: "cancel_agent_response",
+            payload: { requestId, agentId, agent: payload, error: null },
+          });
+        }
+        return;
+      }
       const rotationStop = await this.nativeSeatRotation.cancelForPredecessor(agentId);
       if (rotationStop) {
         if (rotationStop.operation?.state === "cancel_uncertain") {

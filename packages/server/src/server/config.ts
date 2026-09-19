@@ -611,6 +611,7 @@ export function resolveConfigFromPersisted(
     autoArchiveAfterMerge,
     enableTerminalAgentHooks: persisted.daemon?.enableTerminalAgentHooks ?? false,
     enableNativeSeatRotation: persisted.daemon?.enableNativeSeatRotation ?? false,
+    seatRotationPolicy: persisted.daemon?.seatRotationPolicy,
     appendSystemPrompt,
     terminalProfiles,
     agentProfiles,
