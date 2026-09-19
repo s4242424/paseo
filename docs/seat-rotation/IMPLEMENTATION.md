@@ -1,0 +1,69 @@
+# Seat rotation transition core
+
+This is a bounded fixture-proof core under `scripts/seat-rotation/`. It has no
+daemon entrypoint, watcher, plugin, UI, provider hook, policy change or live
+lifecycle call. The controller owns the adapter and any live proof.
+
+## Contract
+
+`SeatRotationCore` accepts an injected backend with these operations:
+
+1. `preflight` establishes the exact predecessor session, repository, source
+   revision, runtime configuration, no writers/permissions/children/external
+   operations/queued goal writers, and positive restart capacity.
+2. `createPreparedSuccessor` accepts the operation ID as its idempotency key.
+   It must create a non-writer successor.
+3. `readSuccessorReadiness` proves a distinct session has read the checkpoint
+   and has the exact repository, source revision, checkpoint hash and runtime.
+4. `fencePredecessor` must establish an atomic writer fence. A read-idle result
+   followed by archive is not an implementation of this operation.
+5. `archivePredecessor` confirms the fenced predecessor's closure/archive.
+   Uncertain closure does not activate the successor.
+6. `activateSuccessor` must return established liveness only after verified old
+   closure. Unknown liveness does not activate the transition.
+7. `reconcile` reads an uncertain operation; the core never blind-recreates it.
+
+The checkpoint is an existing regular file below an existing non-symlink
+handover root. Its SHA-256, operation ID, generation, session, canonical repo
+path and source revision must match the request. It carries only an opaque next
+action string; command and shell checkpoint fields are refused and nothing from
+the checkpoint is executed.
+
+Operations use a durable real-filesystem JSON journal plus per-operation mkdir
+lock. The temporary file is fsynced before rename and the containing directory
+is fsynced after rename. Create, readiness, fence, activation and archive
+uncertainty retain recoverable journal state. Cancellation is accepted only
+before fencing. Reconcile capacity exhaustion blocks before another attempt or
+predecessor retirement.
+
+Usage samples must be finite, fresh, session-matching occupancy values. The
+strict condition is `used / limit > 0.4`; exactly 40% does not latch. Latches
+are scoped to seat, successor generation and successor session. An above-40%
+fresh successor sample with zero recorded completed actions marks the operation
+`blocked` as `no_progress_immediate_retrigger`; it does not create another seat
+and leaves the prepared/activated successor available. Old-seat telemetry is
+inactive. This does not change context settings or repository instructions.
+
+## Evidence
+
+Fixture proof uses the real filesystem and an injected deterministic backend;
+it does not prove installed Paseo lifecycle behaviour or the backend's atomic
+writer fence. Serena and Context7 were unavailable in this environment; no Go
+files changed, so gopls is not applicable. The native audit at
+`.arch/receipts/seat-rotation-20260919/adapter-design/REPORT.md` confirms that
+installed 0.8.0 cannot provide the required fence externally: production reuse
+belongs in the daemon-owned receipt-backed rotate operation, not this script.
+
+| Command                                                                                                                           | Exit | Result                                                                                                                                      |
+| --------------------------------------------------------------------------------------------------------------------------------- | ---: | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `node --test scripts/seat-rotation/core.test.mjs` before `core.mjs` existed                                                       |    1 | RED: missing module                                                                                                                         |
+| `node --test --test-reporter=spec scripts/seat-rotation/core.test.mjs`                                                            |    0 | 10 targeted deterministic fixture cases passed                                                                                              |
+| `node --check scripts/seat-rotation/core.mjs`                                                                                     |    0 | Applicable type/syntax check for stdlib `.mjs`                                                                                              |
+| `npm run format:files -- scripts/seat-rotation/core.mjs scripts/seat-rotation/core.test.mjs docs/seat-rotation/IMPLEMENTATION.md` |    0 | Required formatter                                                                                                                          |
+| `npm run lint -- scripts/seat-rotation/core.mjs scripts/seat-rotation/core.test.mjs`                                              |    0 | Targeted lint; two documented complexity suppressions retain explicit ordered failure states                                                |
+| `npm run typecheck` via repository pre-commit                                                                                     |    2 | Existing Expo base declaration absence and unrelated plugin/CLI type incompatibilities; stdlib `.mjs` has no TypeScript compilation surface |
+| `semgrep --config auto scripts/seat-rotation`                                                                                     |    0 | 200 rules, 2 relevant JS targets, 0 findings                                                                                                |
+| `gitleaks detect --no-git --source scripts/seat-rotation --verbose`                                                               |    0 | 30,457 bytes scanned, 0 leaks                                                                                                               |
+
+`package-lock.json` was unchanged before implementation; final dependency
+evidence is recorded with the verification run.
