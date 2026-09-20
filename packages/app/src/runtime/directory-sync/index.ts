@@ -364,6 +364,8 @@ export class DirectorySync {
 
   async prepareWorkspaceRoute(workspaceId: string): Promise<void> {
     await this.loadCachedWorkspace(workspaceId);
+    if (useSessionStore.getState().sessions[this.serverId]?.workspaces.has(workspaceId)) return;
+    await this.refreshWorkspaces();
   }
 
   private async loadCachedWorkspace(workspaceId: string): Promise<void> {
