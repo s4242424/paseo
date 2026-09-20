@@ -127,13 +127,15 @@ export class NativeSeatRotationService {
   }
 
   async rotate(request: NativeSeatRotationRequest): Promise<NativeSeatRotationResult> {
+    // Set this synchronously, before the async predecessor lock yields. Normal
+    // Stop must be able to write its durable intent during the pre-journal gap.
+    if (!this.predecessorOperations.has(request.predecessorId)) {
+      this.predecessorOperations.set(request.predecessorId, request.operationId);
+    }
     return await this.withPredecessorLock(request.predecessorId, async () => {
       // Keep the first pre-journal intent visible to normal Stop. A concurrent
       // invalid request must not replace and then clear that owner before its
       // durable receipt has been written.
-      if (!this.predecessorOperations.has(request.predecessorId)) {
-        this.predecessorOperations.set(request.predecessorId, request.operationId);
-      }
       try {
         return await this.withOperationLock(
           request.operationId,
