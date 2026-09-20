@@ -23,8 +23,13 @@ const execFile = promisify(execFileCallback);
 const liveProviderSmoke = process.env.RUN_LIVE_PROVIDER_SMOKE === "1" ? test : test.skip;
 const receiptDir = process.env.PROVIDER_LIVE_RECEIPT_DIR;
 
-const TURN_TIMEOUT_MS = 150_000;
-const ROTATION_TIMEOUT_MS = 180_000;
+// Installed provider Stop hooks can legitimately consume about 140 seconds after a
+// completed model turn. Keep each event-driven stage bounded beyond that ordinary
+// hook latency, and keep the enclosing test longer than every serial stage plus
+// cleanup so Vitest cannot abandon a live provider runtime.
+const TURN_TIMEOUT_MS = 420_000;
+const ROTATION_TIMEOUT_MS = 420_000;
+const LIVE_QUALIFICATION_TIMEOUT_MS = 3_900_000;
 
 type Provider = "claude" | "codex";
 
@@ -69,6 +74,15 @@ interface ProviderRunEvidence {
   rotations: RotationEvidence[];
   finalProgress?: unknown;
   archivedPredecessors: string[];
+  stageTimings: Array<{
+    label: string;
+    agentId: string;
+    timeoutMs: number;
+    startedAt: string;
+    finishedAt: string;
+    elapsedMs: number;
+    outcome: string;
+  }>;
 }
 
 interface LiveRotationReport {
@@ -189,7 +203,8 @@ async function waitForTurn(
   client: DaemonClient,
   agentId: string,
   provider: Provider,
-): Promise<void> {
+): Promise<{ outcome: string; elapsedMs: number }> {
+  const startedAt = Date.now();
   const finished = await client.waitForFinish(agentId, TURN_TIMEOUT_MS);
   if (finished.status === "permission") {
     throw new Error(`${provider} requested a permission; no response was sent`);
@@ -197,24 +212,55 @@ async function waitForTurn(
   if (finished.status !== "idle") {
     throw new Error(`${provider} turn did not complete safely: ${finished.status}`);
   }
+  return { outcome: finished.status, elapsedMs: Date.now() - startedAt };
 }
 
-async function awaitSecondIdle(input: {
+async function awaitIdleCount(input: {
   events: Array<{ at: string; agentId: string; status: string | null }>;
   notifier: { signal: () => void };
   agentId: string;
+  count: number;
+  purpose: string;
 }): Promise<void> {
   const idleCount = () =>
     input.events.filter((event) => event.agentId === input.agentId && event.status === "idle")
       .length;
-  if (idleCount() >= 2) return;
+  if (idleCount() >= input.count) return;
   await new Promise<void>((resolve, reject) => {
     const timer = setTimeout(
-      () => reject(new Error(`Timed out waiting for durable second idle for ${input.agentId}`)),
+      () =>
+        reject(
+          new Error(
+            `Timed out waiting for ${input.purpose} idle receipt ${input.count} for ${input.agentId}`,
+          ),
+        ),
       ROTATION_TIMEOUT_MS,
     );
     input.notifier.signal = () => {
-      if (idleCount() >= 2) {
+      if (idleCount() >= input.count) {
+        clearTimeout(timer);
+        resolve();
+      }
+    };
+  });
+}
+
+async function awaitReceiptNotification(input: {
+  events: Array<{ at: string; agentId: string; status: string | null }>;
+  notifier: { signal: () => void };
+  agentId: string;
+}): Promise<void> {
+  const observed = input.events.filter((event) => event.agentId === input.agentId).length;
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(
+      () =>
+        reject(
+          new Error(`Timed out waiting for durable receipt notification for ${input.agentId}`),
+        ),
+      ROTATION_TIMEOUT_MS,
+    );
+    input.notifier.signal = () => {
+      if (input.events.filter((event) => event.agentId === input.agentId).length > observed) {
         clearTimeout(timer);
         resolve();
       }
@@ -356,6 +402,7 @@ async function runProvider(input: {
     inFlightIdentities: [],
     rotations: [],
     archivedPredecessors: [],
+    stageTimings: [],
   };
   input.runs.push(evidence);
   try {
@@ -364,7 +411,18 @@ async function runProvider(input: {
       agent.id,
       "Read TASK.md, progress.json, and .handover/CURRENT.json. Perform exactly step 1 now and then stop.",
     );
-    await waitForTurn(input.client, agent.id, input.expected.provider);
+    const initialStartedAt = new Date().toISOString();
+    const initialTurn = await waitForTurn(input.client, agent.id, input.expected.provider);
+    evidence.stageTimings.push({
+      label: "initial-turn",
+      agentId: agent.id,
+      timeoutMs: TURN_TIMEOUT_MS,
+      startedAt: initialStartedAt,
+      finishedAt: new Date().toISOString(),
+      elapsedMs: initialTurn.elapsedMs,
+      outcome: initialTurn.outcome,
+    });
+    await input.persist();
     evidence.initialProgress = await readProgress(repo, nonce, 1);
     await assertModelCommit(repo);
     const initialRuntime = await assertRuntime({
@@ -426,8 +484,34 @@ async function runProvider(input: {
       if (!request.successorId)
         throw new Error("native rotation accepted without an observable successor id");
       await input.persist();
-      await awaitSecondIdle({ events, notifier, agentId: request.successorId });
-      await waitForTurn(input.client, request.successorId, input.expected.provider);
+      const successorStartedAt = new Date().toISOString();
+      // The second idle proves the real successor turn ended. After that
+      // event, native rotation writes its terminal receipt and re-emits normal
+      // successor state. Observe that distinct subsequent notification before
+      // inspecting; counting all historical idle events races the receipt.
+      await awaitIdleCount({
+        events,
+        notifier,
+        agentId: request.successorId,
+        count: 2,
+        purpose: "successor-turn",
+      });
+      const successorTurn = await waitForTurn(
+        input.client,
+        request.successorId,
+        input.expected.provider,
+      );
+      await awaitReceiptNotification({ events, notifier, agentId: request.successorId });
+      evidence.stageTimings.push({
+        label: `successor-turn-${generation + 1}`,
+        agentId: request.successorId,
+        timeoutMs: TURN_TIMEOUT_MS,
+        startedAt: successorStartedAt,
+        finishedAt: new Date().toISOString(),
+        elapsedMs: successorTurn.elapsedMs,
+        outcome: successorTurn.outcome,
+      });
+      await input.persist();
       rotation.terminal = await input.client.inspectAgentSeatRotation(operationId);
       expect(rotation.terminal).toMatchObject({
         phase: "succeeded",
@@ -543,6 +627,6 @@ describe("seat rotation live providers (real, isolated)", () => {
       if (cleanupFailure) throw cleanupFailure;
       if (primaryError) throw primaryError;
     },
-    1_200_000,
+    LIVE_QUALIFICATION_TIMEOUT_MS,
   );
 });
