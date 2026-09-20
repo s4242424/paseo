@@ -27,6 +27,45 @@ test("latches only a fresh provider-confirmed observation strictly above 40 perc
   await expect(readFile(f.journalPath, "utf8")).resolves.toContain('"state":"latched"');
 });
 
+test.each([
+  [
+    "catalog fallback",
+    (f: Awaited<ReturnType<typeof fixture>>) => {
+      f.agent.lastUsage!.contextWindowObservation!.contextWindowSource = "catalog-fallback";
+    },
+  ],
+  [
+    "a different provider session",
+    (f: Awaited<ReturnType<typeof fixture>>) => {
+      f.agent.lastUsage!.contextWindowObservation!.sessionId = "other-session";
+    },
+  ],
+  [
+    "a different active turn",
+    (f: Awaited<ReturnType<typeof fixture>>) => {
+      f.agent.lastUsage!.contextWindowObservation!.turnId = "other-turn";
+    },
+  ],
+  [
+    "a stale observation time",
+    (f: Awaited<ReturnType<typeof fixture>>) => {
+      f.agent.lastUsage!.contextWindowObservation!.observedAt = "2026-09-19T00:00:00.000Z";
+    },
+  ],
+  [
+    "a non-finite token count",
+    (f: Awaited<ReturnType<typeof fixture>>) => {
+      f.agent.lastUsage!.contextWindowObservation!.usedTokens = Number.NaN;
+    },
+  ],
+])("does not latch %s", async (_name, mutate) => {
+  const f = await fixture();
+  mutate(f);
+  f.emit();
+  await f.flush();
+  await expect(readFile(f.journalPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+});
+
 test("exposes inactive and pre-native latch state with explicit checkpoint-only continuation", async () => {
   const f = await fixture();
   await expect(f.policy.inspectByPredecessor(agentId)).resolves.toEqual({
@@ -104,6 +143,47 @@ test("a Stop cancels a latched preparation and later observations do not replay 
   await expect(readFile(f.journalPath, "utf8")).resolves.toContain('"state":"cancelled"');
 });
 
+test("blocks a latched seat when human work changes its safe boundary", async () => {
+  const f = await fixture();
+  f.emit();
+  await f.flush();
+  f.agent.lastUserMessageAt = new Date("2026-09-20T00:01:00.000Z");
+  f.agent.lifecycle = "idle";
+  f.agent.activeForegroundTurnId = null;
+  f.emit();
+  await f.flush();
+  expect(f.prompts).toHaveLength(0);
+  await expect(readFile(f.journalPath, "utf8")).resolves.toContain(
+    '"reason":"boundary_invalidated_by_user_work"',
+  );
+});
+
+test("refuses a configured repository without its logical seat binding", async () => {
+  const f = await fixture();
+  f.agent.labels = {};
+  await expect(f.policy.inspectByPredecessor(agentId)).resolves.toEqual({
+    operationId: null,
+    phase: "unsupported",
+    reason: "seat_rotation_policy_seat_binding_missing",
+    goalContinuation: null,
+  });
+  f.emit();
+  await f.flush();
+  await expect(readFile(f.journalPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+test("refuses a second live writer for the same logical seat and checkpoint", async () => {
+  const f = await fixture();
+  f.liveAgents.push({ ...f.agent, id: "00000000-0000-4000-8000-000000000002" });
+  await expect(f.policy.inspectByPredecessor(agentId)).resolves.toMatchObject({
+    phase: "unsupported",
+    reason: "seat_rotation_policy_seat_binding_missing",
+  });
+  f.emit();
+  await f.flush();
+  await expect(readFile(f.journalPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+});
+
 test("an immediately high successor remains blocked until its configured witness changes", async () => {
   const f = await fixture();
   await writeFile(f.witnessPath, "unchanged");
@@ -127,6 +207,7 @@ async function fixture() {
   let callback: ((event: AgentManagerEvent) => void) | undefined;
   const prompts: string[] = [];
   const requests: unknown[] = [];
+  const liveAgents: ManagedAgent[] = [];
   const agent = createAgent(repo);
   const manager = {
     getAgent(id: string) {
@@ -134,6 +215,9 @@ async function fixture() {
     },
     getTimelineRows() {
       return [{ seq: 7 }];
+    },
+    listAgents() {
+      return [agent, ...liveAgents];
     },
     subscribe(listener: (event: AgentManagerEvent) => void) {
       callback = listener;
@@ -145,7 +229,10 @@ async function fixture() {
       prompts.push(prompt);
       return (async function* () {})();
     },
-  } as unknown as Pick<AgentManager, "getAgent" | "getTimelineRows" | "subscribe" | "streamAgent">;
+  } as unknown as Pick<
+    AgentManager,
+    "getAgent" | "getTimelineRows" | "listAgents" | "subscribe" | "streamAgent"
+  >;
   const native = {
     async rotate(request: unknown) {
       requests.push(request);
@@ -163,6 +250,7 @@ async function fixture() {
       enabled: true,
       seats: [
         {
+          seatId: "seat-a",
           repositoryPath: repo,
           handoverRoot,
           checkpointPath,
@@ -184,6 +272,7 @@ async function fixture() {
       "operations",
       `${agentId}.json`,
     ),
+    liveAgents,
     policy,
     progressGates: (policy as unknown as { progressGates: Map<string, string> }).progressGates,
     prompts,
@@ -261,7 +350,7 @@ function createAgent(repo: string): ManagedAgent {
     foregroundTurnWaiters: new Set(),
     finalizedForegroundTurnIds: new Set(),
     unsubscribeSession: null,
-    labels: {},
+    labels: { "paseo.seat-id": "seat-a" },
     lifecycle: "running",
     activeForegroundTurnId: "turn-1",
     session: {} as never,

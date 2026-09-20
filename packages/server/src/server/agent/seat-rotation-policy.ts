@@ -42,6 +42,7 @@ interface PolicyJournal {
 }
 
 interface SeatConfig {
+  seatId: string;
   repositoryPath: string;
   handoverRoot: string;
   checkpointPath: string;
@@ -82,7 +83,7 @@ export class SeatRotationPolicy {
       paseoHome: string;
       agentManager: Pick<
         AgentManager,
-        "getAgent" | "getTimelineRows" | "subscribe" | "streamAgent"
+        "getAgent" | "getTimelineRows" | "listAgents" | "subscribe" | "streamAgent"
       >;
       nativeSeatRotation: Pick<NativeSeatRotationService, "rotate" | "cancel">;
       readConfig: () => SeatRotationPolicyConfig;
@@ -128,14 +129,22 @@ export class SeatRotationPolicy {
     const agent = this.options.agentManager.getAgent(predecessorId);
     if (!agent) return unsupportedState("seat_rotation_policy_not_configured");
     const seat = this.seatFor(agent);
-    return seat
-      ? {
-          operationId: null,
-          phase: "inactive",
-          reason: null,
-          goalContinuation: seat.goalContinuation,
-        }
-      : unsupportedState("seat_rotation_policy_not_configured");
+    if (seat) {
+      return {
+        operationId: null,
+        phase: "inactive",
+        reason: null,
+        goalContinuation: seat.goalContinuation,
+      };
+    }
+    const sameRepository = this.options
+      .readConfig()
+      .seats.some((candidate) => candidate.repositoryPath === agent.cwd);
+    return unsupportedState(
+      sameRepository
+        ? "seat_rotation_policy_seat_binding_missing"
+        : "seat_rotation_policy_not_configured",
+    );
   }
 
   private onManagerEvent(event: AgentManagerEvent): void {
@@ -374,11 +383,11 @@ export class SeatRotationPolicy {
         progressWitnessHash,
         reason: result.accepted ? undefined : "native_rotation_not_accepted",
       });
-    } catch {
+    } catch (error) {
       await this.replace(agent.id, {
         ...rotating,
         state: "failed",
-        reason: "native_rotation_failed",
+        reason: `native_rotation_failed:${errorMessage(error)}`,
       });
     }
   }
@@ -462,8 +471,34 @@ export class SeatRotationPolicy {
   private seatFor(agent: ManagedAgent): SeatConfig | null {
     const config = this.options.readConfig();
     if (!config.enabled) return null;
-    const seat = config.seats.find((candidate) => candidate.repositoryPath === agent.cwd);
-    return seat ?? null;
+    const matches = config.seats.filter(
+      (candidate) =>
+        candidate.repositoryPath === agent.cwd &&
+        candidate.seatId === agent.labels["paseo.seat-id"],
+    );
+    if (matches.length !== 1) return null;
+    const seat = matches[0]!;
+    // An explicit logical seat is both the successor binding and the sole
+    // writer lease for its checkpoint. Refuse an ambiguous config or a second
+    // live writer instead of allowing two providers to prepare one handover.
+    if (
+      config.seats.some(
+        (candidate) =>
+          candidate !== seat &&
+          candidate.repositoryPath === seat.repositoryPath &&
+          candidate.checkpointPath === seat.checkpointPath,
+      )
+    )
+      return null;
+    const writers = this.options.agentManager
+      .listAgents()
+      .filter(
+        (candidate) =>
+          candidate.lifecycle !== "closed" &&
+          candidate.cwd === agent.cwd &&
+          candidate.labels["paseo.seat-id"] === seat.seatId,
+      );
+    return writers.length === 1 && writers[0]?.id === agent.id ? seat : null;
   }
 
   private isValidThresholdObservation(agent: ManagedAgent): boolean {

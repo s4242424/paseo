@@ -216,6 +216,7 @@ export type AgentSkillSelection = z.infer<typeof AgentSkillSelectionSchema>;
 
 const SeatRotationPolicySeatSchema = z
   .object({
+    seatId: z.string().min(1),
     repositoryPath: z.string().min(1),
     handoverRoot: z.string().min(1),
     checkpointPath: z.string().min(1),
