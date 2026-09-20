@@ -36,7 +36,12 @@ function HostAgentReadyRouteContent() {
     if (!serverId || !agentId) {
       return null;
     }
-    return state.sessions[serverId]?.agents?.get(agentId)?.workspaceId ?? null;
+    const session = state.sessions[serverId];
+    return (
+      session?.agents.get(agentId)?.workspaceId ??
+      session?.agentDetails.get(agentId)?.workspaceId ??
+      null
+    );
   });
   useEffect(() => {
     if (!serverId || !agentId || agentWorkspaceId) return;

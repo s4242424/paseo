@@ -126,6 +126,7 @@ interface CodexClientLike {
 type CodexTestSession = AgentSession & {
   connected: boolean;
   currentThreadId: string | null;
+  currentTurnId: string | null;
   activeForegroundTurnId: string | null;
   client: CodexClientLike | null;
 };
@@ -167,6 +168,7 @@ function createSession(
   ) as CodexTestSession;
   session.connected = true;
   session.currentThreadId = "test-thread";
+  session.currentTurnId = "native-turn-1";
   session.activeForegroundTurnId = "test-turn";
   return session;
 }
@@ -5560,12 +5562,14 @@ describe("Codex app-server provider", () => {
     ]);
   });
 
-  test("emits usage_updated on token usage updates and keeps usage on turn completion", () => {
+  test("binds current native Codex context usage to the manager turn", () => {
     const session = createSession();
     const events: AgentStreamEvent[] = [];
     session.subscribe((event) => events.push(event));
 
     asInternals(session).handleNotification("thread/tokenUsage/updated", {
+      threadId: "test-thread",
+      turnId: "native-turn-1",
       tokenUsage: {
         model_context_window: 200000,
         last: {
@@ -5590,6 +5594,14 @@ describe("Codex app-server provider", () => {
         outputTokens: 15000,
         contextWindowMaxTokens: 200000,
         contextWindowUsedTokens: 50000,
+        contextWindowObservation: {
+          sessionId: "test-thread",
+          turnId: "test-turn",
+          observedAt: expect.any(String),
+          contextWindowSource: "provider-confirmed",
+          usedTokens: 50000,
+          maxTokens: 200000,
+        },
       },
     });
     expect(events.at(-1)).toEqual({
@@ -5602,8 +5614,92 @@ describe("Codex app-server provider", () => {
         outputTokens: 15000,
         contextWindowMaxTokens: 200000,
         contextWindowUsedTokens: 50000,
+        contextWindowObservation: {
+          sessionId: "test-thread",
+          turnId: "test-turn",
+          observedAt: expect.any(String),
+          contextWindowSource: "provider-confirmed",
+          usedTokens: 50000,
+          maxTokens: 200000,
+        },
       },
     });
+  });
+
+  test("does not bind incomplete native context telemetry to the active turn", () => {
+    const session = createSession();
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    asInternals(session).handleNotification("thread/tokenUsage/updated", {
+      threadId: "test-thread",
+      turnId: "native-turn-1",
+      tokenUsage: {
+        last: { inputTokens: 30_000, outputTokens: 15_000 },
+      },
+    });
+
+    expect(events).toContainEqual({
+      type: "usage_updated",
+      provider: "codex",
+      turnId: "test-turn",
+      usage: {
+        inputTokens: 30_000,
+        outputTokens: 15_000,
+      },
+    });
+  });
+
+  test("rejects a delayed Codex token update from a previous native session", () => {
+    const session = createSession();
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    asInternals(session).handleNotification("thread/tokenUsage/updated", {
+      threadId: "previous-thread",
+      turnId: "native-turn-1",
+      tokenUsage: {
+        model_context_window: 200_000,
+        last: { total_tokens: 50_000 },
+      },
+    });
+
+    expect(events).toEqual([]);
+  });
+
+  test("rejects a delayed Codex token update from a previous native turn", () => {
+    const session = createSession();
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+    asInternals(session).currentTurnId = "native-turn-2";
+    session.activeForegroundTurnId = "foreground-turn-2";
+
+    asInternals(session).handleNotification("thread/tokenUsage/updated", {
+      threadId: "test-thread",
+      turnId: "native-turn-1",
+      tokenUsage: {
+        model_context_window: 200_000,
+        last: { total_tokens: 50_000 },
+      },
+    });
+
+    expect(events).toEqual([]);
+  });
+
+  test("rejects a Codex token update without its required native turn", () => {
+    const session = createSession();
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    asInternals(session).handleNotification("thread/tokenUsage/updated", {
+      threadId: "test-thread",
+      tokenUsage: {
+        model_context_window: 200_000,
+        last: { total_tokens: 50_000 },
+      },
+    });
+
+    expect(events).toEqual([]);
   });
 
   test("streams Codex assistant message deltas and does not replay completed text", () => {

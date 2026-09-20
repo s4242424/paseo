@@ -45,6 +45,13 @@ const AGENT_SORT: NonNullable<FetchAgentsOptions["sort"]> = [
   { key: "updated_at", direction: "desc" },
 ];
 
+function shouldUseDirectorySyncForWorkspaceSnapshot(input: {
+  supportsDirectorySync: boolean;
+  forceSnapshot: boolean | undefined;
+}): boolean {
+  return input.supportsDirectorySync && input.forceSnapshot !== true;
+}
+
 function resolveAgentNextPage(pageInfo: AgentPageInfo): {
   hasMore: boolean;
   nextCursor: string | null;
@@ -364,6 +371,8 @@ export class DirectorySync {
 
   async prepareWorkspaceRoute(workspaceId: string): Promise<void> {
     await this.loadCachedWorkspace(workspaceId);
+    if (useSessionStore.getState().sessions[this.serverId]?.workspaces.has(workspaceId)) return;
+    await this.refreshWorkspaces({ forceSnapshot: true });
   }
 
   private async loadCachedWorkspace(workspaceId: string): Promise<void> {
@@ -526,12 +535,12 @@ export class DirectorySync {
     }
   }
 
-  async refreshWorkspaces(input?: { subscribe?: boolean }): Promise<void> {
+  async refreshWorkspaces(input?: { subscribe?: boolean; forceSnapshot?: boolean }): Promise<void> {
     return this.refreshWorkspacesInternal(input, true);
   }
 
   private async refreshWorkspacesInternal(
-    input: { subscribe?: boolean } | undefined,
+    input: { subscribe?: boolean; forceSnapshot?: boolean } | undefined,
     loadDirectoryCache: boolean,
   ): Promise<void> {
     if (loadDirectoryCache) await this.loadCachedDirectory();
@@ -556,6 +565,10 @@ export class DirectorySync {
       }
       const supportsProjectList = serverInfo.features?.projectList === true;
       const supportsDirectorySync = serverInfo.features?.directorySync === true;
+      const useDirectorySyncForWorkspaceSnapshot = shouldUseDirectorySyncForWorkspaceSnapshot({
+        supportsDirectorySync,
+        forceSnapshot: input?.forceSnapshot,
+      });
       if (supportsProjectList) {
         await this.fetchProjectSnapshot(client, source, transaction, supportsDirectorySync);
       }
@@ -564,7 +577,7 @@ export class DirectorySync {
         source,
         transaction,
         input?.subscribe === true,
-        supportsDirectorySync,
+        useDirectorySyncForWorkspaceSnapshot,
       );
       if (!supportsProjectList) {
         this.buildLegacyProjectSnapshot(transaction.snapshot);

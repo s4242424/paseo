@@ -22,7 +22,9 @@ function ProviderUsageIcon({ iconKey, size, color = "" }: ProviderUsageIconProps
 
 const ThemedProviderUsageIcon = withUnistyles(ProviderUsageIcon);
 
-const mutedIconColor = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
+const mutedIconColor = (theme: Theme) => ({
+  color: theme.colors.foregroundMuted,
+});
 
 function statusText(usage: ProviderUsage): string | null {
   if (usage.status === "available") return null;
@@ -37,17 +39,29 @@ function footerText(usage: ProviderUsage): string | null {
   return parts.length > 0 ? parts.join(" · ") : null;
 }
 
+function isExtraUsage(item: { id: string; label: string }): boolean {
+  return /extra[ -]?usage/i.test(`${item.id} ${item.label}`);
+}
+
 export function ProviderUsageCard({
   usage,
   compact = false,
+  showRemaining = false,
+  accountLabel,
 }: {
   usage: ProviderUsage;
   compact?: boolean;
+  showRemaining?: boolean;
+  accountLabel?: string;
 }) {
   const status = statusText(usage);
   const footer = footerText(usage);
-  const balances = usage.balances ?? [];
-  const details = usage.details ?? [];
+  const balances = (usage.balances ?? []).filter(
+    (balance) =>
+      !compact ||
+      (!isExtraUsage(balance) && !(usage.providerId === "codex" && balance.id === "credits")),
+  );
+  const details = (usage.details ?? []).filter((detail) => !compact || !isExtraUsage(detail));
 
   const containerStyle = useMemo(
     () => [styles.container, compact ? styles.containerCompact : styles.containerPadded],
@@ -61,6 +75,25 @@ export function ProviderUsageCard({
     ],
     [usage.status],
   );
+  let headerMeta = null;
+  if (compact && accountLabel) {
+    headerMeta = (
+      <Text
+        accessibilityLabel={`Signed-in ${usage.displayName} account: ${accountLabel}`}
+        style={styles.accountLabel}
+        numberOfLines={1}
+      >
+        {accountLabel}
+      </Text>
+    );
+  } else if (status) {
+    headerMeta = (
+      <View style={styles.statusRow}>
+        <View style={dotStyle} />
+        <Text style={styles.statusLabel}>{status}</Text>
+      </View>
+    );
+  }
 
   return (
     <View style={containerStyle}>
@@ -69,15 +102,19 @@ export function ProviderUsageCard({
         <Text style={styles.name} numberOfLines={1}>
           {usage.displayName}
         </Text>
-        {usage.planLabel ? <StatusBadge label={usage.planLabel} variant="muted" /> : null}
-        <View style={styles.headerSpacer} />
-        {status ? (
-          <View style={styles.statusRow}>
-            <View style={dotStyle} />
-            <Text style={styles.statusLabel}>{status}</Text>
-          </View>
+        {!compact && usage.planLabel ? (
+          <StatusBadge label={usage.planLabel} variant="muted" />
         ) : null}
+        <View style={styles.headerSpacer} />
+        {headerMeta}
       </View>
+
+      {compact && status ? (
+        <View style={styles.compactStatusRow}>
+          <View style={dotStyle} />
+          <Text style={styles.statusLabel}>{status}</Text>
+        </View>
+      ) : null}
 
       {usage.error ? (
         <Text style={styles.error} numberOfLines={3}>
@@ -88,7 +125,7 @@ export function ProviderUsageCard({
       {usage.windows.length > 0 || balances.length > 0 ? (
         <View style={styles.bars}>
           {usage.windows.map((window) => (
-            <ProviderUsageWindowBar key={window.id} window={window} />
+            <ProviderUsageWindowBar key={window.id} window={window} showRemaining={showRemaining} />
           ))}
           {balances.map((balance) => (
             <ProviderUsageBalanceBar key={balance.id} balance={balance} />
@@ -165,6 +202,18 @@ const styles = StyleSheet.create((theme) => ({
   statusLabel: {
     color: theme.colors.foregroundMuted,
     fontSize: theme.fontSize.sm,
+  },
+  accountLabel: {
+    flexShrink: 1,
+    maxWidth: "60%",
+    color: theme.colors.foregroundMuted,
+    fontSize: theme.fontSize.sm,
+    textAlign: "right",
+  },
+  compactStatusRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[1.5],
   },
   bars: {
     gap: theme.spacing[3],

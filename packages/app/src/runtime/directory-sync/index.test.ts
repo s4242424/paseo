@@ -189,6 +189,79 @@ afterEach(() => {
 });
 
 describe("DirectorySync session readiness", () => {
+  it("refreshes an online workspace route absent from the targeted cache", async () => {
+    const serverId = "workspace-route-cache-miss";
+    serverIds.add(serverId);
+    const client = new FakeDirectoryClient();
+    const completeFetch = client.holdWorkspaceFetch();
+    const directory = new DirectorySync(
+      serverId,
+      {
+        onAgentStoppedRunning: () => undefined,
+        markAgentLoading: () => undefined,
+        markAgentReady: () => undefined,
+        markAgentError: () => undefined,
+      },
+      {
+        readAgent: async () => undefined,
+        readWorkspace: async () => undefined,
+        readDirectory: async () => ({
+          agents: new Map(),
+          workspaces: new Map(),
+          projects: new Map(),
+          checkpoint: { workspaces: { generation: "stale-directory", afterSeq: 9 } },
+        }),
+        commitDirectoryMutations: () => undefined,
+      },
+    );
+    directory.connectionChanged({
+      client: client as unknown as DaemonClient,
+      status: "online",
+      source: { clientGeneration: 1, connectionEpoch: 1 },
+    });
+    const store = useSessionStore.getState();
+    store.initializeSession(serverId, client as unknown as DaemonClient, 1);
+    store.updateSessionServerInfo(serverId, {
+      serverId,
+      hostname: null,
+      version: "test",
+      features: { workspaceMultiplicity: true },
+    });
+
+    const prepare = directory.prepareWorkspaceRoute("historical-workspace");
+    await expect.poll(() => client.fetchWorkspacesCalls).toBe(1);
+    expect(client.lastWorkspaceOptions).not.toHaveProperty("sync");
+    completeFetch({
+      requestId: "workspaces",
+      entries: [
+        {
+          id: "historical-workspace",
+          projectId: "historical-project",
+          projectDisplayName: "Historical project",
+          projectRootPath: "/repo/historical",
+          workspaceDirectory: "/repo/historical",
+          projectKind: "git",
+          workspaceKind: "local_checkout",
+          name: "historical",
+          status: "done",
+          statusEnteredAt: null,
+          activityAt: null,
+          archivingAt: null,
+          diffStat: null,
+          scripts: [],
+        },
+      ],
+      emptyProjects: [],
+      pageInfo: { hasMore: false, nextCursor: null, prevCursor: null },
+    });
+    await prepare;
+
+    expect(
+      useSessionStore.getState().sessions[serverId]?.workspaces.has("historical-workspace"),
+    ).toBe(true);
+    directory.dispose();
+  });
+
   it("restores the cached directory before network demand", async () => {
     const serverId = "offline-cached-directory";
     serverIds.add(serverId);

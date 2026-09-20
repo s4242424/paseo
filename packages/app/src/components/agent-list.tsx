@@ -412,6 +412,7 @@ export function AgentList({
         agentId,
         workspaceId: agent.workspaceId,
         pin: true,
+        preserveSeatRotation: true,
       });
     },
     [isActionSheetVisible, onAgentSelect],

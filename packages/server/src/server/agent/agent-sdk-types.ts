@@ -227,6 +227,17 @@ export interface SteerActiveTurnOptions extends AgentSteerOptions {
   expectedTurnId: string;
 }
 
+export type ContextWindowSource = "provider-confirmed" | "catalog-fallback" | "unknown";
+
+export interface ContextWindowObservation {
+  sessionId: string;
+  turnId: string;
+  observedAt: string;
+  contextWindowSource: ContextWindowSource;
+  usedTokens?: number;
+  maxTokens?: number;
+}
+
 export interface AgentUsage {
   inputTokens?: number;
   cachedInputTokens?: number;
@@ -234,6 +245,7 @@ export interface AgentUsage {
   totalCostUsd?: number;
   contextWindowMaxTokens?: number;
   contextWindowUsedTokens?: number;
+  contextWindowObservation?: ContextWindowObservation;
 }
 
 export const TOOL_CALL_ICON_NAMES = [

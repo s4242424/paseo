@@ -28,6 +28,7 @@ export interface NavigateToWorkspaceInput {
   workspaceId: string;
   target?: WorkspaceTabTarget;
   pin?: boolean;
+  preserveSeatRotation?: boolean;
   placement?: WorkspaceTabPlacement;
 }
 
@@ -120,6 +121,7 @@ export function navigateToWorkspace(
           input.serverId,
           input.workspaceId,
           `agent:${input.target.agentId}`,
+          input.preserveSeatRotation === true,
         )
       : buildHostWorkspaceRoute(input.serverId, input.workspaceId);
   deps.rememberLastWorkspace({ serverId: input.serverId, workspaceId: input.workspaceId });

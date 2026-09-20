@@ -214,6 +214,27 @@ export const AgentSkillSelectionSchema = z.discriminatedUnion("mode", [
 ]);
 export type AgentSkillSelection = z.infer<typeof AgentSkillSelectionSchema>;
 
+const SeatRotationPolicySeatSchema = z
+  .object({
+    seatId: z.string().min(1),
+    repositoryPath: z.string().min(1),
+    handoverRoot: z.string().min(1),
+    checkpointPath: z.string().min(1),
+    progressWitnessPath: z.string().min(1),
+    resumePrompt: z.string().min(1),
+    // Native rotation resumes an explicit prompt; it cannot transfer provider goals.
+    goalContinuation: z.literal("checkpoint_only"),
+  })
+  .strict();
+
+export const SeatRotationPolicyConfigSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    seats: z.array(SeatRotationPolicySeatSchema).default([]),
+  })
+  .strict();
+export type SeatRotationPolicyConfig = z.infer<typeof SeatRotationPolicyConfigSchema>;
+
 export const MutableDaemonConfigSchema = z
   .object({
     // COMPAT(relayConfig): added in v0.2.6, remove after 2027-01-31 when old daemons are unsupported.
@@ -245,6 +266,9 @@ export const MutableDaemonConfigSchema = z
     metadataGeneration: MutableMetadataGenerationConfigSchema.default({ providers: [] }),
     autoArchiveAfterMerge: z.boolean().default(false),
     enableTerminalAgentHooks: z.boolean().default(false),
+    // Disabled until a host explicitly opts in: this operation fences and archives agents.
+    enableNativeSeatRotation: z.boolean().default(false),
+    seatRotationPolicy: SeatRotationPolicyConfigSchema.optional(),
     appendSystemPrompt: z.string().default(""),
     terminalProfiles: z.array(TerminalProfileSchema).optional(),
     agentProfiles: z.array(AgentProfileSchema).optional(),
@@ -266,6 +290,8 @@ export const MutableDaemonConfigPatchSchema = z
     metadataGeneration: MutableMetadataGenerationConfigSchema.partial().optional(),
     autoArchiveAfterMerge: z.boolean().optional(),
     enableTerminalAgentHooks: z.boolean().optional(),
+    enableNativeSeatRotation: z.boolean().optional(),
+    seatRotationPolicy: SeatRotationPolicyConfigSchema.partial().optional(),
     appendSystemPrompt: z.string().optional(),
     terminalProfiles: z.array(TerminalProfileSchema).optional(),
     agentProfiles: z.array(AgentProfileSchema).optional(),
@@ -425,6 +451,15 @@ const AgentCapabilityFlagsSchema: z.ZodType<AgentCapabilityFlags> = z
   })
   .catchall(z.boolean());
 
+const ContextWindowObservationSchema: z.ZodType<AgentUsage["contextWindowObservation"]> = z.object({
+  sessionId: z.string(),
+  turnId: z.string(),
+  observedAt: z.string(),
+  contextWindowSource: z.enum(["provider-confirmed", "catalog-fallback", "unknown"]),
+  usedTokens: z.number().optional(),
+  maxTokens: z.number().optional(),
+});
+
 const AgentUsageSchema: z.ZodType<AgentUsage> = z.object({
   inputTokens: z.number().optional(),
   cachedInputTokens: z.number().optional(),
@@ -432,6 +467,7 @@ const AgentUsageSchema: z.ZodType<AgentUsage> = z.object({
   totalCostUsd: z.number().optional(),
   contextWindowMaxTokens: z.number().optional(),
   contextWindowUsedTokens: z.number().optional(),
+  contextWindowObservation: ContextWindowObservationSchema.optional(),
 });
 
 const McpStdioServerConfigSchema = z.object({
@@ -1943,6 +1979,122 @@ export const AgentDetachRequestMessageSchema = z.object({
   requestId: z.string(),
 });
 
+// COMPAT(nativeSeatRotation): added in v0.8.0; old hosts ignore this feature-gated request.
+export const AgentSeatRotationRequestMessageSchema = z.object({
+  type: z.literal("agent.seat_rotation.request"),
+  requestId: z.string(),
+  operationId: z.string().uuid(),
+  predecessorId: z.string().uuid(),
+  generation: z.number().int().positive(),
+  handoverRoot: z.string().min(1),
+  checkpointPath: z.string().min(1),
+  resumePrompt: z.string().min(1),
+});
+
+export const AgentSeatRotationResponseMessageSchema = z.object({
+  type: z.literal("agent.seat_rotation.response"),
+  payload: z.object({
+    requestId: z.string(),
+    accepted: z.boolean(),
+    state: z.string().nullable(),
+    successorId: z.string().uuid().nullable(),
+    error: z.string().nullable(),
+  }),
+});
+
+export const AgentSeatRotationCancelRequestMessageSchema = z.object({
+  type: z.literal("agent.seat_rotation.cancel.request"),
+  requestId: z.string(),
+  operationId: z.string().uuid(),
+  // COMPAT(nativeSeatRotationPreJournalStop): optional while older clients retain operation-only Stop.
+  predecessorId: z.string().uuid().optional(),
+});
+
+export const AgentSeatRotationCancelResponseMessageSchema = z.object({
+  type: z.literal("agent.seat_rotation.cancel.response"),
+  payload: z.object({
+    requestId: z.string(),
+    accepted: z.boolean(),
+    state: z.string().nullable(),
+    successorId: z.string().uuid().nullable(),
+    error: z.string().nullable(),
+  }),
+});
+
+export const AgentSeatRotationInspectRequestMessageSchema = z.object({
+  type: z.literal("agent.seat_rotation.inspect.request"),
+  requestId: z.string(),
+  operationId: z.string().uuid(),
+});
+
+export const AgentSeatRotationInspectResponseMessageSchema = z.object({
+  type: z.literal("agent.seat_rotation.inspect.response"),
+  payload: z.object({
+    requestId: z.string(),
+    operationId: z.string().uuid(),
+    phase: z.enum(["pending", "succeeded", "failed"]).nullable(),
+    successorId: z.string().uuid().nullable(),
+    workspaceId: z.string().nullable(),
+    sourceRevision: z.string().nullable(),
+    revision: z.number().int().nonnegative().nullable(),
+    failureCode: z.string().nullable(),
+    error: z.string().nullable(),
+  }),
+});
+
+// COMPAT(nativeSeatRotationPredecessorLookup): added in v0.8.0; old hosts ignore this gated request.
+export const AgentSeatRotationPredecessorInspectRequestMessageSchema = z.object({
+  type: z.literal("agent.seat_rotation.predecessor.inspect.request"),
+  requestId: z.string(),
+  predecessorId: z.string().uuid(),
+});
+
+export const AgentSeatRotationPredecessorInspectResponseMessageSchema = z.object({
+  type: z.literal("agent.seat_rotation.predecessor.inspect.response"),
+  payload: z.object({
+    requestId: z.string(),
+    operationId: z.string().uuid().nullable(),
+    phase: z.enum(["pending", "succeeded", "failed"]).nullable(),
+    successorId: z.string().uuid().nullable(),
+    workspaceId: z.string().nullable(),
+    sourceRevision: z.string().nullable(),
+    revision: z.number().int().nonnegative().nullable(),
+    failureCode: z.string().nullable(),
+    error: z.string().nullable(),
+  }),
+});
+
+// COMPAT(seatRotationPolicyStatus): added in v0.8.0; old hosts ignore this feature-gated request.
+export const AgentSeatRotationPolicyInspectRequestMessageSchema = z.object({
+  type: z.literal("agent.seat_rotation.policy.inspect.request"),
+  requestId: z.string(),
+  predecessorId: z.string().uuid(),
+});
+
+export const AgentSeatRotationPolicyInspectResponseMessageSchema = z.object({
+  type: z.literal("agent.seat_rotation.policy.inspect.response"),
+  payload: z.object({
+    requestId: z.string(),
+    operationId: z.string().uuid().nullable(),
+    phase: z
+      .enum([
+        "unsupported",
+        "inactive",
+        "latched",
+        "preparing",
+        "rotating",
+        "native_handoff",
+        "blocked",
+        "failed",
+        "cancelled",
+      ])
+      .nullable(),
+    reason: z.string().nullable(),
+    goalContinuation: z.literal("checkpoint_only").nullable(),
+    error: z.string().nullable(),
+  }),
+});
+
 export const AgentDetachResponseMessageSchema = z.object({
   type: z.literal("agent.detach.response"),
   payload: AgentActionResponsePayloadSchema,
@@ -2593,6 +2745,12 @@ export const WorkspaceClearAttentionRequestSchema = z.object({
   requestId: z.string(),
 });
 
+export const WorkspaceMarkUnreadRequestSchema = z.object({
+  type: z.literal("workspace.mark_unread.request"),
+  workspaceId: z.string(),
+  requestId: z.string(),
+});
+
 // Highlighted diff token schema
 // Note: style can be a compound class name (e.g., "heading meta") from the syntax highlighter
 const HighlightTokenSchema = z.object({
@@ -3156,6 +3314,11 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   SetAgentFeatureRequestMessageSchema,
   AgentConfigApplyRequestMessageSchema,
   AgentDetachRequestMessageSchema,
+  AgentSeatRotationRequestMessageSchema,
+  AgentSeatRotationCancelRequestMessageSchema,
+  AgentSeatRotationInspectRequestMessageSchema,
+  AgentSeatRotationPredecessorInspectRequestMessageSchema,
+  AgentSeatRotationPolicyInspectRequestMessageSchema,
   AgentRewindRequestMessageSchema,
   AgentPermissionResponseMessageSchema,
   CheckoutStatusRequestSchema,
@@ -3203,6 +3366,7 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   ArchiveWorkspaceRequestSchema,
   WorkspaceCreateRequestSchema,
   WorkspaceClearAttentionRequestSchema,
+  WorkspaceMarkUnreadRequestSchema,
   FileExplorerRequestSchema,
   FileSubscribeRequestSchema,
   FileUnsubscribeRequestSchema,
@@ -3426,6 +3590,10 @@ export const ServerInfoStatusPayloadSchema = z
       .object({
         // COMPAT(agentRequestReceipts): added in v0.8.0; remove gate after 2027-03-05.
         agentRequestReceipts: z.boolean().optional(),
+        // COMPAT(nativeSeatRotation): added in v0.8.0; remove gate after 2027-09-19.
+        nativeSeatRotation: z.boolean().optional(),
+        // COMPAT(seatRotationPolicyStatus): added in v0.8.0; old hosts do not expose pre-native state.
+        seatRotationPolicyStatus: z.boolean().optional(),
         // COMPAT(hubAgentRpc): added in v0.8.0; remove gate after 2027-03-05.
         hubAgentRpc: z.boolean().optional(),
         providersSnapshot: z.boolean().optional(),
@@ -3529,6 +3697,8 @@ export const ServerInfoStatusPayloadSchema = z
         providerSubagentNesting: z.boolean().optional(),
         // COMPAT(workspacePinning): added in v0.1.107, remove gate after 2027-01-12.
         workspacePinning: z.boolean().optional(),
+        // COMPAT(workspaceMarkUnread): added in v0.5.0, remove after 2027-08-20.
+        workspaceMarkUnread: z.boolean().optional(),
         // COMPAT(hubRelationship): added in v0.1.X, drop the gate when floor >= v0.1.X.
         hubRelationship: z.boolean().optional(),
         // COMPAT(projectGithubClone): added in v0.1.108, remove gate after 2027-01-15.
@@ -4672,6 +4842,17 @@ export const WorkspaceClearAttentionResponseSchema = z.object({
         error: z.string().nullable(),
       }),
     ),
+    success: z.boolean(),
+    error: z.string().nullable(),
+  }),
+});
+
+export const WorkspaceMarkUnreadResponseSchema = z.object({
+  type: z.literal("workspace.mark_unread.response"),
+  payload: z.object({
+    requestId: z.string(),
+    workspaceId: z.string(),
+    markedAgentId: z.string().nullable(),
     success: z.boolean(),
     error: z.string().nullable(),
   }),
@@ -6526,6 +6707,7 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   ClearAgentAttentionResponseMessageSchema,
   WorkspaceCreateResponseSchema,
   WorkspaceClearAttentionResponseSchema,
+  WorkspaceMarkUnreadResponseSchema,
   SendAgentMessageResponseMessageSchema,
   SetVoiceModeResponseMessageSchema,
   DaemonGetStatusResponseSchema,
@@ -6546,6 +6728,11 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   SetAgentFeatureResponseMessageSchema,
   AgentConfigApplyResponseMessageSchema,
   AgentDetachResponseMessageSchema,
+  AgentSeatRotationResponseMessageSchema,
+  AgentSeatRotationCancelResponseMessageSchema,
+  AgentSeatRotationInspectResponseMessageSchema,
+  AgentSeatRotationPredecessorInspectResponseMessageSchema,
+  AgentSeatRotationPolicyInspectResponseMessageSchema,
   AgentRewindResponseMessageSchema,
   UpdateAgentResponseMessageSchema,
   ProjectRenameResponseSchema,
@@ -6744,6 +6931,18 @@ export type SetAgentThinkingResponseMessage = z.infer<typeof SetAgentThinkingRes
 export type SetAgentFeatureResponseMessage = z.infer<typeof SetAgentFeatureResponseMessageSchema>;
 export type AgentConfigApplyResponseMessage = z.infer<typeof AgentConfigApplyResponseMessageSchema>;
 export type AgentDetachResponseMessage = z.infer<typeof AgentDetachResponseMessageSchema>;
+export type AgentSeatRotationResponseMessage = z.infer<
+  typeof AgentSeatRotationResponseMessageSchema
+>;
+export type AgentSeatRotationCancelResponseMessage = z.infer<
+  typeof AgentSeatRotationCancelResponseMessageSchema
+>;
+export type AgentSeatRotationInspectResponseMessage = z.infer<
+  typeof AgentSeatRotationInspectResponseMessageSchema
+>;
+export type AgentSeatRotationPredecessorInspectResponseMessage = z.infer<
+  typeof AgentSeatRotationPredecessorInspectResponseMessageSchema
+>;
 export type AgentRewindResponseMessage = z.infer<typeof AgentRewindResponseMessageSchema>;
 export type UpdateAgentResponseMessage = z.infer<typeof UpdateAgentResponseMessageSchema>;
 export type ProjectRenameResponse = z.infer<typeof ProjectRenameResponseSchema>;
@@ -7026,6 +7225,7 @@ export type ProjectGithubCloneRequest = z.infer<typeof ProjectGithubCloneRequest
 export type ProjectGithubCloneProtocol = z.infer<typeof ProjectGithubCloneProtocolSchema>;
 export type ArchiveWorkspaceRequest = z.infer<typeof ArchiveWorkspaceRequestSchema>;
 export type WorkspaceClearAttentionRequest = z.infer<typeof WorkspaceClearAttentionRequestSchema>;
+export type WorkspaceMarkUnreadRequest = z.infer<typeof WorkspaceMarkUnreadRequestSchema>;
 export type FileExplorerRequest = z.infer<typeof FileExplorerRequestSchema>;
 export type FileExplorerResponse = z.infer<typeof FileExplorerResponseSchema>;
 export type FileVersion = z.infer<typeof FileVersionSchema>;

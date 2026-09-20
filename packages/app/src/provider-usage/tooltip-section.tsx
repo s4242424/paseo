@@ -1,33 +1,89 @@
+import { useCallback } from "react";
 import { Text, View } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
+import { Button } from "@/components/ui/button";
+import { useInstalledPlugins } from "@/plugins/registry";
+import { useHostRuntimeIsConnected } from "@/runtime/host-runtime";
+import { navigateToWorkspace } from "@/stores/navigation-active-workspace-store";
 import { ProviderUsageCard } from "./card";
+import { canOpenAccountPanel, resolveAccountPanelTarget } from "./account-panel";
 import { providerUsageCopy } from "./copy";
 import type { ProviderUsage, ProviderUsageView } from "./types";
+import { useProviderAccountLabels } from "./use-provider-usage";
 
-function matchProvider(
-  providers: ProviderUsage[],
-  activeProviderId: string | null | undefined,
-): ProviderUsage | null {
-  if (!activeProviderId) return null;
-  const target = activeProviderId.toLowerCase();
-  return providers.find((usage) => usage.providerId.toLowerCase() === target) ?? null;
+const COMBINED_PROVIDER_IDS = new Set(["claude", "codex"]);
+
+export function selectCombinedProviderUsage(providers: ProviderUsage[]): ProviderUsage[] {
+  return providers.filter((usage) => COMBINED_PROVIDER_IDS.has(usage.providerId.toLowerCase()));
 }
 
-// Renders the active agent's provider usage inside the context-meter tooltip.
-// Returns nothing when the active provider has no usage entry, so the meter's
-// own context section stays the whole tooltip.
 export function ProviderUsageTooltipSection({
   view,
-  activeProviderId,
+  serverId,
+  workspaceId,
+  agentId,
+  isPopoverOpen,
 }: {
   view: ProviderUsageView;
-  activeProviderId: string | null | undefined;
+  serverId: string | null | undefined;
+  workspaceId: string | null | undefined;
+  agentId: string | null | undefined;
+  isPopoverOpen: boolean;
 }) {
+  const plugins = useInstalledPlugins();
+  const isConnected = useHostRuntimeIsConnected(serverId ?? "");
+  const accountPanel = resolveAccountPanelTarget(plugins, serverId);
+  const accountLabels = useProviderAccountLabels(
+    serverId,
+    accountPanel?.pluginId ?? null,
+    isPopoverOpen,
+  );
+  const accountPanelAvailable = canOpenAccountPanel({
+    accountPanel,
+    isConnected,
+    workspaceId,
+    agentId,
+  });
+
+  const openAccountPanel = useCallback(() => {
+    if (!accountPanel || !serverId || !workspaceId || !agentId) return;
+    navigateToWorkspace({
+      serverId,
+      workspaceId,
+      target: {
+        kind: "plugin",
+        pluginId: accountPanel.pluginId,
+        panelId: accountPanel.panelId,
+        context: "agent",
+        agentId,
+      },
+    });
+  }, [accountPanel, agentId, serverId, workspaceId]);
+  const accountAction = (
+    <>
+      <Button
+        accessibilityLabel="Switch account"
+        disabled={!accountPanelAvailable}
+        onPress={openAccountPanel}
+        size="xs"
+        style={styles.accountAction}
+        testID="provider-usage-switch-account"
+        variant="outline"
+      >
+        Switch
+      </Button>
+      {!accountPanelAvailable ? (
+        <Text style={styles.detail}>Account switching is unavailable on this host.</Text>
+      ) : null}
+    </>
+  );
+
   if (view.kind === "loading") {
     return (
       <>
         <View style={styles.divider} />
         <Text style={styles.detail}>{providerUsageCopy.tooltipLoading}</Text>
+        {accountAction}
       </>
     );
   }
@@ -37,22 +93,44 @@ export function ProviderUsageTooltipSection({
       <>
         <View style={styles.divider} />
         <Text style={styles.error}>{view.message}</Text>
+        {accountAction}
       </>
     );
   }
 
-  const usage = matchProvider(view.payload.providers, activeProviderId);
-  if (!usage) return null;
+  const usages = selectCombinedProviderUsage(view.payload.providers);
+  if (usages.length === 0) {
+    return (
+      <>
+        <View style={styles.divider} />
+        {accountAction}
+      </>
+    );
+  }
 
   return (
     <>
       <View style={styles.divider} />
-      <ProviderUsageCard usage={usage} compact />
+      <View style={styles.usages}>
+        {usages.map((usage) => (
+          <ProviderUsageCard
+            key={usage.providerId}
+            usage={usage}
+            compact
+            showRemaining
+            accountLabel={accountLabels[usage.providerId.toLowerCase() as "claude" | "codex"]}
+          />
+        ))}
+      </View>
+      {accountAction}
     </>
   );
 }
 
 const styles = StyleSheet.create((theme) => ({
+  accountAction: {
+    alignSelf: "flex-end",
+  },
   divider: {
     height: 1,
     // Same token the popover draws its own outline with, so the rule reads as the
@@ -71,5 +149,8 @@ const styles = StyleSheet.create((theme) => ({
     color: theme.colors.palette.red[300],
     fontSize: theme.fontSize.sm,
     lineHeight: theme.fontSize.sm * 1.4,
+  },
+  usages: {
+    gap: theme.spacing[4],
   },
 }));

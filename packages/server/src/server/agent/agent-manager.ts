@@ -77,6 +77,7 @@ import {
 } from "./agent-run-state.js";
 import { invokeRewindCapability, type RewindMode } from "./rewind/rewind.js";
 import { isSystemInjectedEnvelope } from "./agent-prompt.js";
+import { isStaleProviderSessionError } from "./stale-provider-session-error.js";
 import { stripInternalPaseoMcpServer, withRuntimePaseoMcpServer } from "./runtime-mcp-config.js";
 import { resolveCreateAgentTitles } from "./create-agent-title.js";
 import type { PaseoToolCatalogFactory } from "./tools/types.js";
@@ -135,6 +136,16 @@ export type AgentRunCancellationResult =
   | { status: "not_running" }
   | { status: "settled" }
   | { status: "refused" };
+
+/**
+ * An in-process admission record for a native handover. Its durable counterpart
+ * is owned by the seat-rotation service; this record closes the gap between a
+ * safety read and the next prompt admission in this manager instance.
+ */
+export interface NativeSeatRotationAdmission {
+  operationId: string;
+  generation: number;
+}
 
 interface PreparedSessionConfig {
   storedConfig: AgentSessionConfig;
@@ -696,10 +707,14 @@ export class AgentManager {
   private readonly agents = new Map<string, LiveManagedAgent>();
   private readonly timelineStore = new InMemoryAgentTimelineStore();
   private readonly providerSubagents = new ProviderSubagentStore();
+  private nativeSeatRotationAdmissionLookup:
+    | ((agentId: string) => NativeSeatRotationAdmission | null)
+    | null = null;
   private readonly agentsAwaitingInitialSnapshotPersist = new Set<string>();
   private readonly sessionEventTails = new Map<string, Promise<void>>();
   private readonly steerEventBarriers = new Map<string, SteerEventBarrier>();
   private readonly foregroundMutationTails = new Map<string, Promise<void>>();
+  private readonly nativeSeatRotationAdmissions = new Map<string, NativeSeatRotationAdmission>();
   private readonly runs = new AgentRunState();
   private readonly subscribers = new Set<SubscriptionRecord>();
   private readonly idFactory: () => string;
@@ -775,6 +790,7 @@ export class AgentManager {
   updateProviderRegistry(input: {
     providerDefinitions: ProviderEnabledMap;
     clients: ProviderClientMap;
+    retiredProviders?: readonly AgentProvider[];
   }): void {
     this.providerEnabled.clear();
     this.providerDefinitions.clear();
@@ -789,6 +805,18 @@ export class AgentManager {
     for (const [provider, client] of Object.entries(input.clients)) {
       if (client) {
         this.clients.set(provider, client);
+      }
+    }
+
+    for (const provider of input.retiredProviders ?? []) {
+      for (const agent of this.agents.values()) {
+        if (agent.provider !== provider) continue;
+        void this.closeAgent(agent.id).catch((error) => {
+          this.logger.warn(
+            { err: error, agentId: agent.id, provider },
+            "Failed to close agent after provider retirement",
+          );
+        });
       }
     }
   }
@@ -1124,6 +1152,59 @@ export class AgentManager {
   getAgent(id: string): ManagedAgent | null {
     const agent = this.agents.get(id);
     return agent ? { ...agent } : null;
+  }
+
+  /**
+   * Reserve an idle predecessor generation before a successor is prepared.
+   * Every foreground write entrypoint checks this same map, so an unrelated
+   * prompt cannot slip between preflight and archive.
+   */
+  beginNativeSeatRotationAdmission(agentId: string, admission: NativeSeatRotationAdmission): void {
+    const existing = this.nativeSeatRotationAdmissions.get(agentId);
+    if (existing) {
+      if (
+        existing.operationId === admission.operationId &&
+        existing.generation === admission.generation
+      ) {
+        return;
+      }
+      throw new Error(
+        `Agent ${agentId} generation ${existing.generation} is already reserved by native rotation ${existing.operationId}`,
+      );
+    }
+    const agent = this.requireSessionAgent(agentId);
+    if (this.hasInFlightRun(agentId)) {
+      throw new Error(`Agent ${agentId} has an active foreground writer`);
+    }
+    if (agent.pendingPermissions.size > 0 || agent.inFlightPermissionResponses.size > 0) {
+      throw new Error(`Agent ${agentId} has unresolved permissions`);
+    }
+    if (this.providerSubagents.list(agentId).length > 0) {
+      throw new Error(`Agent ${agentId} has provider subagents; native rotation is unsupported`);
+    }
+    this.nativeSeatRotationAdmissions.set(agentId, { ...admission });
+  }
+
+  endNativeSeatRotationAdmission(agentId: string, operationId: string): void {
+    const existing = this.nativeSeatRotationAdmissions.get(agentId);
+    if (existing?.operationId === operationId) {
+      this.nativeSeatRotationAdmissions.delete(agentId);
+    }
+  }
+
+  getNativeSeatRotationAdmission(agentId: string): NativeSeatRotationAdmission | null {
+    const admission = this.nativeSeatRotationAdmissions.get(agentId);
+    return admission ? { ...admission } : null;
+  }
+
+  /**
+   * The rotation coordinator persists a generation receipt. Consult it at each
+   * provider-write boundary so a daemon restart cannot reopen a fenced seat.
+   */
+  setNativeSeatRotationAdmissionLookup(
+    lookup: (agentId: string) => NativeSeatRotationAdmission | null,
+  ): void {
+    this.nativeSeatRotationAdmissionLookup = lookup;
   }
 
   async waitForAgentClose(agentId: string): Promise<void> {
@@ -1703,6 +1784,7 @@ export class AgentManager {
     const { archivedAt } = await this.markRecordArchived(stored);
     agent.updatedAt = new Date(archivedAt);
     await this.closeAgentRuntime(agentId);
+    await this.syncNativeArchiveState(stored.provider, stored.persistence, "archive");
     this.discardRetainedAgentState(agentId);
 
     await this.cascadeArchiveChildren(agentId);
@@ -1762,12 +1844,10 @@ export class AgentManager {
       updatedAt: archivedAt,
     });
 
-    await this.syncNativeArchiveState(record.provider, record.persistence, "archive");
-
     if (this.agents.has(record.id)) {
       this.notifyAgentState(record.id);
     } else if (!archivedRecord.internal) {
-      this.dispatchArchivedStoredAgent(archivedRecord);
+      this.dispatchStoredAgentState(archivedRecord);
     }
 
     await this.fireAgentArchived(record.id);
@@ -1802,8 +1882,16 @@ export class AgentManager {
     }
   }
 
-  private dispatchArchivedStoredAgent(record: StoredAgentRecord): void {
+  private dispatchStoredAgentState(record: StoredAgentRecord): void {
     const updatedAt = new Date(record.updatedAt);
+    const attention: AttentionState =
+      record.requiresAttention && record.attentionReason && record.attentionTimestamp
+        ? {
+            requiresAttention: true,
+            attentionReason: record.attentionReason,
+            attentionTimestamp: new Date(record.attentionTimestamp),
+          }
+        : { requiresAttention: false };
     this.dispatch({
       type: "agent_state",
       agent: {
@@ -1837,7 +1925,7 @@ export class AgentManager {
         lastUserMessageAt: record.lastUserMessageAt ? new Date(record.lastUserMessageAt) : null,
         lastUsage: undefined,
         lastError: record.lastError ?? undefined,
-        attention: { requiresAttention: false },
+        attention,
         internal: record.internal,
         labels: record.labels,
       },
@@ -2047,6 +2135,46 @@ export class AgentManager {
     }
   }
 
+  async markAgentUnread(agentId: string): Promise<void> {
+    const liveAgent = this.agents.get(agentId);
+    if (liveAgent) {
+      const isFinished = liveAgent.lifecycle === "idle";
+      const hasPendingPermissions = liveAgent.pendingPermissions.size > 0;
+      const canMarkUnread =
+        isFinished && !liveAgent.attention.requiresAttention && !hasPendingPermissions;
+      if (!canMarkUnread) {
+        throw new Error(`Agent is no longer finished and read: ${agentId}`);
+      }
+      liveAgent.attention = {
+        requiresAttention: true,
+        attentionReason: "finished",
+        attentionTimestamp: new Date(),
+      };
+      await this.persistSnapshot(liveAgent);
+      this.emitState(liveAgent, { persist: false });
+      return;
+    }
+
+    const registry = this.requireRegistry();
+    const record = await registry.get(agentId);
+    const hasFinishedStatus = record?.lastStatus === "idle" || record?.lastStatus === "closed";
+    const canMarkUnread =
+      record && !record.internal && !record.archivedAt && !record.requiresAttention;
+    if (!canMarkUnread || !hasFinishedStatus) {
+      throw new Error(`Agent is no longer finished and read: ${agentId}`);
+    }
+    const updatedAt = this.nextStoredUpdatedAt(record);
+    const nextRecord: StoredAgentRecord = {
+      ...record,
+      updatedAt,
+      requiresAttention: true,
+      attentionReason: "finished",
+      attentionTimestamp: updatedAt,
+    };
+    await registry.upsert(nextRecord);
+    this.dispatchStoredAgentState(nextRecord);
+  }
+
   async archiveSnapshot(agentId: string, archivedAt: string): Promise<StoredAgentRecord> {
     const registry = this.requireRegistry();
     const liveAgent = this.getAgent(agentId);
@@ -2070,7 +2198,7 @@ export class AgentManager {
     } else {
       this.discardRetainedAgentState(agentId);
       if (!nextRecord.internal) {
-        this.dispatchArchivedStoredAgent(nextRecord);
+        this.dispatchStoredAgentState(nextRecord);
       }
     }
 
@@ -2090,6 +2218,8 @@ export class AgentManager {
       return false;
     }
 
+    // Archived history may have loaded a runtime that still owns the native writer.
+    await this.closeAgent(agentId);
     await this.syncNativeArchiveState(record.provider, record.persistence, "restore");
 
     await registry.upsert({
@@ -2219,6 +2349,7 @@ export class AgentManager {
    * broadcast like normal timeline events.
    */
   tryRunOutOfBand(agentId: string, prompt: AgentPromptInput, options?: AgentRunOptions): boolean {
+    this.assertNativeSeatRotationAllowsPrompt(agentId);
     const agent = this.requireSessionAgent(agentId);
     const handler = agent.session.tryHandleOutOfBand?.(prompt);
     if (!handler) {
@@ -2311,6 +2442,13 @@ export class AgentManager {
       if (pendingRun.settled) {
         throw error;
       }
+      if (isStaleProviderSessionError(error)) {
+        pendingRun.start = { status: "failed", error: error.message };
+        agent.pendingReplacement = false;
+        if (!agent.activeForegroundTurnId) agent.lifecycle = "idle";
+        this.runs.settleForegroundRun(agentId, pendingRun.token);
+        throw error;
+      }
       agent.pendingReplacement = false;
       const errorMsg = error instanceof Error ? error.message : "Failed to start turn";
       pendingRun.start = { status: "failed", error: errorMsg };
@@ -2330,6 +2468,7 @@ export class AgentManager {
     prompt: AgentPromptInput,
     options?: AgentRunOptions,
   ): AsyncGenerator<AgentStreamEvent> {
+    this.assertNativeSeatRotationAllowsPrompt(agentId);
     const existingAgent = this.requireSessionAgent(agentId);
     this.logger.trace(
       {
@@ -2369,6 +2508,9 @@ export class AgentManager {
     const streamForwarder = async function* streamForwarder(this: AgentManager) {
       let turnId: string;
       let turnStream: ReturnType<AgentRunState["createTurnStream"]> | null = null;
+      // An iterator can be admitted by a caller and only consumed after a
+      // rotation fence is established. Re-check at the provider-write boundary.
+      this.assertNativeSeatRotationAllowsPrompt(agentId);
       turnId = await this.startPendingForegroundTurn({
         agent,
         agentId,
@@ -2527,6 +2669,7 @@ export class AgentManager {
     prompt: AgentPromptInput,
     options?: AgentRunOptions,
   ): Promise<AsyncGenerator<AgentStreamEvent>> {
+    this.assertNativeSeatRotationAllowsPrompt(agentId);
     const snapshot = this.requireAgent(agentId);
     if (
       snapshot.lifecycle !== "running" &&
@@ -2587,6 +2730,7 @@ export class AgentManager {
     prompt: AgentPromptInput,
     options?: AgentSteerOptions,
   ): Promise<ActiveTurnSteerDispatchResult> {
+    this.assertNativeSeatRotationAllowsPrompt(agentId);
     const agent = this.requireSessionAgent(agentId);
     const expectedTurnId = agent.activeForegroundTurnId ?? agent.activeTurnId;
     if (!expectedTurnId) {
@@ -2673,6 +2817,18 @@ export class AgentManager {
       if (this.foregroundMutationTails.get(agentId) === tail) {
         this.foregroundMutationTails.delete(agentId);
       }
+    }
+  }
+
+  private assertNativeSeatRotationAllowsPrompt(agentId: string): void {
+    const admission =
+      this.nativeSeatRotationAdmissions.get(agentId) ??
+      this.nativeSeatRotationAdmissionLookup?.(agentId) ??
+      null;
+    if (admission) {
+      throw new Error(
+        `Agent ${agentId} is reserved by native rotation ${admission.operationId} for generation ${admission.generation}`,
+      );
     }
   }
 
@@ -2836,6 +2992,9 @@ export class AgentManager {
     response: AgentPermissionResponse,
   ): Promise<AgentPermissionResult | void> {
     const agent = this.requireAgent(agentId);
+    if (agent.inFlightPermissionResponses.has(requestId)) {
+      throw new Error("A response to this permission request is already being submitted");
+    }
     agent.inFlightPermissionResponses.add(requestId);
 
     try {
@@ -3030,8 +3189,11 @@ export class AgentManager {
           epoch: this.timelineStore.getEpoch(agentId),
         });
       }
-      await this.refreshRuntimeInfo(agent);
+      // Rewind stages provider events under the run lock; publish its final state directly.
+      this.refreshSessionPersistence(agent);
+      await this.refreshSessionState(agent, { emit: false });
       await this.persistSnapshot(agent);
+      this.emitState(agent, { persist: false });
       this.logger.info(
         { agentId, provider: agent.provider, messageId, mode },
         "agent.rewind.complete",
@@ -4182,14 +4344,18 @@ export class AgentManager {
 
   private onStreamThreadStarted(agent: ActiveManagedAgent): void {
     const previousSessionId = agent.persistence?.sessionId ?? null;
+    this.refreshSessionPersistence(agent);
+    if (agent.persistence?.sessionId !== previousSessionId) {
+      this.emitState(agent);
+    }
+    void this.refreshRuntimeInfo(agent);
+  }
+
+  private refreshSessionPersistence(agent: ActiveManagedAgent): void {
     const handle = agent.session.describePersistence();
     if (handle) {
       agent.persistence = attachPersistenceCwd(handle, agent.cwd);
-      if (agent.persistence?.sessionId !== previousSessionId) {
-        this.emitState(agent);
-      }
     }
-    void this.refreshRuntimeInfo(agent);
   }
 
   private async onStreamTimelineEvent(params: {
@@ -4394,6 +4560,7 @@ export class AgentManager {
   ): void {
     const hadPendingPermissions = agent.pendingPermissions.size > 0;
     agent.pendingPermissions.set(event.request.id, event.request);
+    this.refreshSessionPersistence(agent);
     if (!hadPendingPermissions && !agent.internal) {
       this.broadcastAgentAttention(agent, "permission");
     }
@@ -4408,6 +4575,7 @@ export class AgentManager {
   }): void {
     const { agent, event, options, flags } = params;
     agent.pendingPermissions.delete(event.requestId);
+    this.refreshSessionPersistence(agent);
     if (!options?.fromHistory && agent.inFlightPermissionResponses.has(event.requestId)) {
       agent.bufferedPermissionResolutions.set(event.requestId, event);
       flags.shouldDispatchEvent = false;

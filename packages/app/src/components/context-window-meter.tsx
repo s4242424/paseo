@@ -14,8 +14,8 @@ interface ContextWindowMeterProps {
   totalCostUsd?: number | null;
   showPercentage?: boolean;
   serverId?: string;
-  /** The Paseo provider key, e.g. "claude", "gemini", "codex" */
-  provider?: string | null;
+  workspaceId?: string | null;
+  agentId?: string | null;
   /** Reserve the meter footprint and show a loading ring while usage is pending. */
   pending?: boolean;
   /** Optional glyph envelope for icon-toolbar alignment. */
@@ -102,7 +102,8 @@ export function ContextWindowMeter({
   totalCostUsd,
   showPercentage = false,
   serverId,
-  provider,
+  workspaceId,
+  agentId,
   pending = false,
   glyphSize,
 }: ContextWindowMeterProps) {
@@ -173,12 +174,13 @@ export function ContextWindowMeter({
       delayDuration={0}
       enabledOnDesktop
       enabledOnMobile
+      interactive
     >
       <TooltipTrigger asChild triggerRefProp="ref">
         <Pressable
           style={containerStyle}
           testID="context-window-meter"
-          accessibilityRole="image"
+          accessibilityRole="button"
           accessibilityLabel={t("contextWindow.accessibility", {
             percentage: roundedPercentage,
           })}
@@ -216,7 +218,7 @@ export function ContextWindowMeter({
           ) : null}
         </Pressable>
       </TooltipTrigger>
-      <TooltipContent side="top" align="center" offset={8}>
+      <TooltipContent testID="context-window-meter-popover" side="top" align="center" offset={8}>
         <View style={styles.tooltipContent}>
           <Text style={styles.tooltipTitle}>{t("contextWindow.title")}</Text>
           <Text style={styles.tooltipText}>
@@ -233,7 +235,13 @@ export function ContextWindowMeter({
               {t("contextWindow.sessionCost", { cost: formattedSessionCost })}
             </Text>
           ) : null}
-          <ProviderUsageTooltipSection view={providerUsageView} activeProviderId={provider} />
+          <ProviderUsageTooltipSection
+            view={providerUsageView}
+            serverId={serverId}
+            workspaceId={workspaceId}
+            agentId={agentId}
+            isPopoverOpen={isTooltipOpen}
+          />
         </View>
       </TooltipContent>
     </Tooltip>

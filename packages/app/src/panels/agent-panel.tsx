@@ -60,6 +60,7 @@ import {
 } from "@/hooks/use-agent-screen-state-machine";
 import { useArchiveAgent } from "@/hooks/use-archive-agent";
 import { useContainerWidthBelow } from "@/hooks/use-container-width";
+import { useHostFeature } from "@/runtime/host-features";
 import { reconcileMissingAgentStateWithPresentAgent } from "@/panels/agent-panel-load-state";
 import {
   reconcileReconnectToastState,
@@ -94,6 +95,10 @@ import {
   useSessionStore,
 } from "@/stores/session-store";
 import { useWorkspaceLayoutStore } from "@/stores/workspace-layout-store";
+import {
+  useSeatRotationContinuity,
+  type SeatRotationContinuityController,
+} from "@/seat-rotation/use-seat-rotation-continuity";
 import { buildWorkspaceTabPersistenceKey } from "@/workspace-tabs/model";
 import { openWorkspaceChanges } from "@/workspace-tabs/open-supporting-view";
 import { useSettings } from "@/hooks/use-settings";
@@ -382,6 +387,29 @@ function AgentPanel() {
   const { serverId, workspaceId, target, openFileInWorkspace } = usePaneContext();
   const { isInteractive } = usePaneFocus();
   invariant(target.kind === "agent", "AgentPanel requires agent target");
+  const client = useHostRuntimeClient(serverId);
+  const isConnected = useHostRuntimeIsConnected(serverId);
+  const supportsSeatRotation = useHostFeature(serverId, "nativeSeatRotation");
+  const supportsSeatRotationPolicy = useHostFeature(serverId, "seatRotationPolicyStatus");
+  const retargetSeatRotationAgentTab = useWorkspaceLayoutStore((state) => state.retargetAgentTab);
+  const retargetCurrentSeat = useCallback(
+    (successor: { kind: "agent"; agentId: string }, operationId: string) => {
+      const workspaceKey = buildWorkspaceTabPersistenceKey({ serverId, workspaceId });
+      if (!workspaceKey) return;
+      retargetSeatRotationAgentTab(workspaceKey, target.agentId, successor.agentId, operationId);
+    },
+    [retargetSeatRotationAgentTab, serverId, target.agentId, workspaceId],
+  );
+  const seatRotation = useSeatRotationContinuity({
+    serverId,
+    workspaceId,
+    predecessorId: target.agentId,
+    client,
+    isConnected,
+    supported: supportsSeatRotation,
+    policySupported: supportsSeatRotationPolicy,
+    retargetCurrentTab: retargetCurrentSeat,
+  });
 
   return (
     <AgentPanelContent
@@ -390,6 +418,7 @@ function AgentPanel() {
       agentId={target.agentId}
       isPaneFocused={isInteractive}
       onOpenWorkspaceFile={openFileInWorkspace}
+      seatRotation={seatRotation}
     />
   );
 }
@@ -520,12 +549,14 @@ function AgentPanelContent({
   agentId,
   isPaneFocused,
   onOpenWorkspaceFile,
+  seatRotation,
 }: {
   serverId: string;
   workspaceId: string;
   agentId: string;
   isPaneFocused: boolean;
   onOpenWorkspaceFile?: (request: WorkspaceFileOpenRequest) => void;
+  seatRotation: SeatRotationContinuityController;
 }) {
   const { t } = useTranslation();
   const resolvedAgentId = agentId.trim() || undefined;
@@ -579,6 +610,7 @@ function AgentPanelContent({
       isConnected={runtimeIsConnected}
       connectionStatus={connectionStatus}
       onOpenWorkspaceFile={onOpenWorkspaceFile}
+      seatRotation={seatRotation}
     />
   );
 }
@@ -592,6 +624,7 @@ function AgentPanelBody({
   isConnected,
   connectionStatus,
   onOpenWorkspaceFile,
+  seatRotation,
 }: {
   serverId: string;
   workspaceId: string;
@@ -601,6 +634,7 @@ function AgentPanelBody({
   isConnected: boolean;
   connectionStatus: HostRuntimeConnectionStatus;
   onOpenWorkspaceFile?: (request: WorkspaceFileOpenRequest) => void;
+  seatRotation: SeatRotationContinuityController;
 }) {
   const { t } = useTranslation();
   const { isArchivingAgent: _isArchivingAgent } = useArchiveAgent();
@@ -761,6 +795,7 @@ function AgentPanelBody({
       isConnected={isConnected}
       connectionStatus={connectionStatus}
       onOpenWorkspaceFile={onOpenWorkspaceFile}
+      seatRotation={seatRotation}
     />
   );
 }
@@ -774,6 +809,7 @@ function ChatAgentContent({
   isConnected,
   connectionStatus,
   onOpenWorkspaceFile,
+  seatRotation,
 }: {
   serverId: string;
   workspaceId: string;
@@ -783,6 +819,7 @@ function ChatAgentContent({
   isConnected: boolean;
   connectionStatus: HostRuntimeConnectionStatus;
   onOpenWorkspaceFile?: (request: WorkspaceFileOpenRequest) => void;
+  seatRotation: SeatRotationContinuityController;
 }) {
   const { t } = useTranslation();
   const isPaneVisible = useRetainedPanelActive();
@@ -1203,6 +1240,7 @@ function ChatAgentContent({
       isRetryingHistorySync={isRetryingHistorySync}
       cwd={agentCwd}
       retryTimelineSync={retryTimelineSync}
+      seatRotation={seatRotation}
       onAttentionInputFocus={attentionController.clearOnInputFocus}
       onAttentionPromptSend={attentionController.clearOnPromptSend}
       onOpenWorkspaceFile={onOpenWorkspaceFile}
@@ -1231,6 +1269,7 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
   showHistorySyncError,
   isRetryingHistorySync,
   retryTimelineSync,
+  seatRotation,
   cwd,
   onAttentionInputFocus,
   onAttentionPromptSend,
@@ -1256,6 +1295,7 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
   showHistorySyncError: boolean;
   isRetryingHistorySync: boolean;
   retryTimelineSync: () => void;
+  seatRotation: SeatRotationContinuityController;
   cwd: string;
   onAttentionInputFocus: () => void;
   onAttentionPromptSend: () => void;
@@ -1410,6 +1450,8 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
             </View>
           ) : null}
 
+          <SeatRotationCallout controller={seatRotation} />
+
           {composerSection}
 
           {showHistorySyncOverlay ? (
@@ -1440,6 +1482,85 @@ function DockedChatSurface({ children, disabled }: { children: ReactNode; disabl
         {children}
       </FileDropZone>
     </KeyboardDock>
+  );
+}
+
+function SeatRotationCallout({ controller }: { controller: SeatRotationContinuityController }) {
+  if (controller.state.kind === "ready") {
+    return null;
+  }
+
+  if (controller.state.kind === "idle") {
+    if (controller.policyState.kind === "preparing") {
+      return (
+        <View style={styles.seatRotationCallout} testID="seat-rotation-preparing">
+          <Text style={styles.seatRotationText}>Preparing this agent for its successor…</Text>
+          <Button
+            size="sm"
+            variant="secondary"
+            onPress={controller.cancel}
+            disabled={controller.isCancelling}
+            testID="seat-rotation-cancel"
+          >
+            {controller.isCancelling ? "Stopping…" : "Stop"}
+          </Button>
+        </View>
+      );
+    }
+
+    if (controller.policyState.kind === "nativeHandoff") {
+      return (
+        <View style={styles.seatRotationCallout} testID="seat-rotation-native-handoff">
+          <Text style={styles.seatRotationText}>Moving this agent to its successor…</Text>
+        </View>
+      );
+    }
+
+    if (controller.policyState.kind === "recoverable") {
+      const reason = controller.policyState.reason ?? controller.policyState.phase;
+      return (
+        <View style={styles.seatRotationCallout} testID="seat-rotation-policy-recoverable">
+          <Text style={styles.seatRotationText}>
+            Rotation preparation needs attention ({reason}). This agent is still available.
+          </Text>
+        </View>
+      );
+    }
+    return null;
+  }
+
+  if (controller.state.kind === "pending") {
+    return (
+      <View style={styles.seatRotationCallout} testID="seat-rotation-pending">
+        <Text style={styles.seatRotationText}>Moving this agent to its successor…</Text>
+        <Button
+          size="sm"
+          variant="secondary"
+          onPress={controller.cancel}
+          disabled={controller.isCancelling}
+          testID="seat-rotation-cancel"
+        >
+          {controller.isCancelling ? "Stopping…" : "Stop"}
+        </Button>
+      </View>
+    );
+  }
+
+  if (controller.state.kind === "failed") {
+    const reason = controller.state.failureCode ?? "unknown failure";
+    return (
+      <View style={styles.seatRotationCallout} testID="seat-rotation-failed">
+        <Text style={styles.seatRotationText}>
+          Rotation did not complete ({reason}). This agent is still available.
+        </Text>
+      </View>
+    );
+  }
+
+  return (
+    <View style={styles.seatRotationCallout} testID="seat-rotation-waiting-successor">
+      <Text style={styles.seatRotationText}>Restoring the rotated agent…</Text>
+    </View>
   );
 }
 
@@ -1851,6 +1972,22 @@ const styles = StyleSheet.create((theme) => ({
     paddingHorizontal: theme.spacing[4],
   },
   timelineSyncCalloutText: {
+    color: theme.colors.foregroundMuted,
+    fontSize: theme.fontSize.base,
+  },
+  seatRotationCallout: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: theme.spacing[3],
+    backgroundColor: theme.colors.surface1,
+    borderTopWidth: theme.borderWidth[1],
+    borderColor: theme.colors.border,
+    paddingHorizontal: theme.spacing[4],
+    paddingVertical: theme.spacing[3],
+  },
+  seatRotationText: {
+    flex: 1,
     color: theme.colors.foregroundMuted,
     fontSize: theme.fontSize.base,
   },

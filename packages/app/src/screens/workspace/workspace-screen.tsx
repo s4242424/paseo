@@ -13,6 +13,7 @@ import {
   type ReactNode,
 } from "react";
 import { useStoreWithEqualityFn } from "zustand/traditional";
+import { useShallow } from "zustand/shallow";
 import { useIsFocused } from "@react-navigation/native";
 import { BackHandler, Keyboard, Pressable, Text, View } from "react-native";
 import { useQueryClient } from "@tanstack/react-query";
@@ -96,6 +97,8 @@ import {
   useHostRuntimeSnapshot,
   useHosts,
 } from "@/runtime/host-runtime";
+import { useHostFeature } from "@/runtime/host-features";
+import { useWorkspaceSeatRotationContinuity } from "@/seat-rotation/use-workspace-seat-rotation-continuity";
 import { prefetchProvidersSnapshot } from "@/hooks/use-providers-snapshot";
 import {
   shouldSeedWorkspaceSetupTab,
@@ -197,6 +200,7 @@ import {
   WorkspaceHeaderMenuDesktop,
   WorkspaceHeaderMenuMobile,
 } from "@/screens/workspace/workspace-header-menu";
+import { PluginHeaderButtons } from "@/plugins";
 import {
   createWorkspaceFileTabTarget,
   normalizeWorkspaceFileLocation,
@@ -782,6 +786,7 @@ interface MobileMountedTabSlotProps {
   isWorkspaceFocused: boolean;
   isPaneFocused: boolean;
   paneId: string | null;
+  onFocusPane: (paneId: string) => void;
   buildPaneContentModel: (input: {
     paneId: string | null;
     tab: WorkspaceTabDescriptor;
@@ -794,6 +799,7 @@ const MobileMountedTabSlot = memo(function MobileMountedTabSlot({
   isWorkspaceFocused,
   isPaneFocused,
   paneId,
+  onFocusPane,
   buildPaneContentModel,
 }: MobileMountedTabSlotProps) {
   const content = useMemo(
@@ -804,15 +810,21 @@ const MobileMountedTabSlot = memo(function MobileMountedTabSlot({
       }),
     [buildPaneContentModel, paneId, tabDescriptor],
   );
+  const handleTouch = useCallback(() => {
+    if (!isPaneFocused && paneId) onFocusPane(paneId);
+    return false;
+  }, [isPaneFocused, onFocusPane, paneId]);
 
   return (
     <RenderProfile id={`MobileMountedTabSlot:${tabDescriptor.kind}:${tabDescriptor.tabId}`}>
       <RetainedPanel active={isVisible} style={styles.mobileMountedTabSlot}>
-        <WorkspacePaneContent
-          content={content}
-          isWorkspaceFocused={isWorkspaceFocused}
-          isPaneFocused={isPaneFocused}
-        />
+        <View style={styles.mobileMountedTabSlot} onStartShouldSetResponderCapture={handleTouch}>
+          <WorkspacePaneContent
+            content={content}
+            isWorkspaceFocused={isWorkspaceFocused}
+            isPaneFocused={isPaneFocused}
+          />
+        </View>
       </RetainedPanel>
     </RenderProfile>
   );
@@ -1079,6 +1091,8 @@ interface RenderWorkspaceContentInput {
   focusedPaneTabDescriptorMap: Map<string, WorkspaceTabDescriptor>;
   isRouteFocused: boolean;
   focusedPaneId: string | null;
+  paneFocusSuspended: boolean;
+  onFocusPane: (paneId: string) => void;
   buildMobilePaneContentModel: (input: {
     paneId: string | null;
     tab: WorkspaceTabDescriptor;
@@ -1095,6 +1109,8 @@ function renderWorkspaceContent(input: RenderWorkspaceContentInput): React.React
     focusedPaneTabDescriptorMap,
     isRouteFocused,
     focusedPaneId,
+    paneFocusSuspended,
+    onFocusPane,
     buildMobilePaneContentModel,
   } = input;
 
@@ -1134,8 +1150,9 @@ function renderWorkspaceContent(input: RenderWorkspaceContentInput): React.React
         tabDescriptor={tabDescriptor}
         isVisible={isRouteFocused && tabId === activeTabDescriptor.tabId}
         isWorkspaceFocused={isRouteFocused}
-        isPaneFocused={tabId === activeTabDescriptor.tabId}
+        isPaneFocused={!paneFocusSuspended && tabId === activeTabDescriptor.tabId}
         paneId={focusedPaneId}
+        onFocusPane={onFocusPane}
         buildPaneContentModel={buildMobilePaneContentModel}
       />
     );
@@ -1799,6 +1816,9 @@ function WorkspaceScreenContent({
   const workspaceLayout = useWorkspaceLayoutStore((state) =>
     persistenceKey ? (state.layoutByWorkspace[persistenceKey] ?? null) : null,
   );
+  const unfocusedPaneId = useWorkspaceLayoutStore((state) =>
+    persistenceKey ? state.focusRestorationByWorkspace[persistenceKey]?.restorePaneId : undefined,
+  );
   const explorerSidebarPaneId = useWorkspaceLayoutStore((state) =>
     persistenceKey ? selectExplorerSidebarPaneId(state, persistenceKey) : null,
   );
@@ -1818,6 +1838,53 @@ function WorkspaceScreenContent({
   const uiTabs = useMemo(
     () => (workspaceLayout ? collectAllTabs(workspaceLayout.root) : EMPTY_UI_TABS),
     [workspaceLayout],
+  );
+  const sessionAgents = useSessionStore(
+    (state) => state.sessions[normalizedServerId]?.agents ?? null,
+  );
+  const sessionAgentDetails = useSessionStore(
+    (state) => state.sessions[normalizedServerId]?.agentDetails ?? null,
+  );
+  const tabAgentArchiveState = useMemo(() => {
+    const archiveState = new Map<string, string | null>();
+    for (const tab of uiTabs) {
+      if (tab.target.kind !== "agent") continue;
+      const agent =
+        sessionAgents?.get(tab.target.agentId) ??
+        sessionAgentDetails?.get(tab.target.agentId) ??
+        null;
+      archiveState.set(tab.target.agentId, agent?.archivedAt?.toISOString() ?? null);
+    }
+    return archiveState;
+  }, [sessionAgentDetails, sessionAgents, uiTabs]);
+  const supportsSeatRotation = useHostFeature(normalizedServerId, "nativeSeatRotation");
+  const retargetSeatRotationAgentTab = useWorkspaceLayoutStore((state) => state.retargetAgentTab);
+  const handleSeatRotationAgentRetarget = useCallback(
+    (predecessorId: string, successorId: string, operationId: string) => {
+      if (!persistenceKey) return;
+      retargetSeatRotationAgentTab(persistenceKey, predecessorId, successorId, operationId);
+    },
+    [persistenceKey, retargetSeatRotationAgentTab],
+  );
+  const continuityAgentIds = useWorkspaceSeatRotationContinuity({
+    serverId: normalizedServerId,
+    tabs: uiTabs,
+    agentArchiveState: tabAgentArchiveState,
+    client,
+    isConnected,
+    supported: supportsSeatRotation,
+    retargetAgentTab: handleSeatRotationAgentRetarget,
+  });
+  const historicalSeatRotationAgentIds = useWorkspaceLayoutStore(
+    useShallow((state) =>
+      persistenceKey
+        ? Object.keys(state.historicalSeatRotationAgentIdsByWorkspace[persistenceKey] ?? {})
+        : [],
+    ),
+  );
+  const retainedContinuityAgentIds = useMemo(
+    () => new Set([...continuityAgentIds, ...historicalSeatRotationAgentIds]),
+    [continuityAgentIds, historicalSeatRotationAgentIds],
   );
   useOpenAgentTabLabels({
     client,
@@ -1898,8 +1965,9 @@ function WorkspaceScreenContent({
       deriveWorkspacePaneState({
         layout: workspaceLayout,
         tabs: uiTabs,
+        paneId: workspaceLayout?.focusedPaneId ?? unfocusedPaneId,
       }),
-    [uiTabs, workspaceLayout],
+    [uiTabs, workspaceLayout, unfocusedPaneId],
   );
   const viewedTimelineSync = useSessionStore(
     (state) => state.sessions[normalizedServerId]?.viewedTimelineSync ?? null,
@@ -2030,6 +2098,7 @@ function WorkspaceScreenContent({
         terminalsHydrated: terminalsQuery.isSuccess,
         knownTerminalIds,
         standaloneTerminalIds,
+        continuityAgentIds: retainedContinuityAgentIds,
         hasActivePendingTerminalCreate:
           createTerminalMutation.isPending || pendingTerminalCreateInput !== null,
         hasActivePendingDraftCreate: hasActivePendingDraftCreateInWorkspace,
@@ -2040,6 +2109,7 @@ function WorkspaceScreenContent({
     hasHydratedWorkspaceLayoutStore,
     pendingTerminalCreateInput,
     createTerminalMutation.isPending,
+    retainedContinuityAgentIds,
     isRouteFocused,
     normalizedServerId,
     normalizedWorkspaceId,
@@ -3621,6 +3691,12 @@ function WorkspaceScreenContent({
     },
     [buildPaneContentModel],
   );
+  const handleFocusPane = useStableEvent(function handleFocusPane(paneId: string) {
+    if (!persistenceKey || paneFocusSuppressedRef.current) {
+      return;
+    }
+    focusWorkspacePane(persistenceKey, paneId);
+  });
   const content = renderWorkspaceContent({
     isMissingWorkspaceDirectory,
     activeTabDescriptor,
@@ -3630,6 +3706,8 @@ function WorkspaceScreenContent({
     focusedPaneTabDescriptorMap,
     isRouteFocused,
     focusedPaneId,
+    paneFocusSuspended: Boolean(unfocusedPaneId),
+    onFocusPane: handleFocusPane,
     buildMobilePaneContentModel,
   });
 
@@ -3654,13 +3732,6 @@ function WorkspaceScreenContent({
       })),
     [activeTabDescriptor?.tabId, closingTabIds, hoveredCloseTabKey, tabs],
   );
-
-  const handleFocusPane = useStableEvent(function handleFocusPane(paneId: string) {
-    if (!persistenceKey || paneFocusSuppressedRef.current) {
-      return;
-    }
-    focusWorkspacePane(persistenceKey, paneId);
-  });
 
   const handleSplitPane = useCallback(
     function handleSplitPane(input: {
@@ -3739,6 +3810,7 @@ function WorkspaceScreenContent({
   const headerRight = useMemo(
     () => (
       <View style={styles.headerRight}>
+        <PluginHeaderButtons serverId={normalizedServerId} workspaceId={normalizedWorkspaceId} />
         {!isMobile && workspaceDescriptor && workspaceDescriptor.scripts.length > 0 ? (
           <WorkspaceScriptsButton
             serverId={normalizedServerId}
@@ -4161,7 +4233,7 @@ const styles = StyleSheet.create((theme) => ({
       md: "row",
     },
     alignItems: {
-      xs: "flex-start",
+      xs: "stretch",
       md: "center",
     },
     justifyContent: "flex-start",

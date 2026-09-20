@@ -15,6 +15,7 @@ import type {
   AgentSessionConfig,
   AgentRuntimeInfo,
   AgentUsage,
+  ContextWindowObservation,
   ImportableProviderSession,
 } from "./agent-sdk-types.js";
 import type { ManagedAgent } from "./agent-manager.js";
@@ -454,7 +455,13 @@ function sanitizeMetadataArray(value: unknown): AgentMetadata[] | undefined {
   return sanitized.length > 0 ? sanitized : undefined;
 }
 
-type UsageNumericField = Exclude<keyof AgentUsage, never>;
+type UsageNumericField =
+  | "inputTokens"
+  | "cachedInputTokens"
+  | "outputTokens"
+  | "totalCostUsd"
+  | "contextWindowMaxTokens"
+  | "contextWindowUsedTokens";
 
 function assignFiniteNumber(
   source: { [key: string]: JsonValue },
@@ -467,6 +474,46 @@ function assignFiniteNumber(
     return true;
   }
   return raw === undefined || raw === null;
+}
+
+function isContextWindowSource(
+  value: unknown,
+): value is ContextWindowObservation["contextWindowSource"] {
+  return value === "provider-confirmed" || value === "catalog-fallback" || value === "unknown";
+}
+
+function isOptionalFiniteNumber(value: unknown): value is number | undefined {
+  return value === undefined || (typeof value === "number" && Number.isFinite(value));
+}
+
+function sanitizeContextWindowObservation(
+  value: JsonValue | undefined,
+): ContextWindowObservation | null | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!isJsonObject(value)) {
+    return null;
+  }
+  const { sessionId, turnId, observedAt, contextWindowSource, usedTokens, maxTokens } = value;
+  if (
+    typeof sessionId !== "string" ||
+    typeof turnId !== "string" ||
+    typeof observedAt !== "string" ||
+    !isContextWindowSource(contextWindowSource) ||
+    !isOptionalFiniteNumber(usedTokens) ||
+    !isOptionalFiniteNumber(maxTokens)
+  ) {
+    return null;
+  }
+  return {
+    sessionId,
+    turnId,
+    observedAt,
+    contextWindowSource,
+    ...(typeof usedTokens === "number" ? { usedTokens } : {}),
+    ...(typeof maxTokens === "number" ? { maxTokens } : {}),
+  };
 }
 
 function sanitizeUsage(value: unknown): AgentUsage | undefined {
@@ -487,6 +534,13 @@ function sanitizeUsage(value: unknown): AgentUsage | undefined {
     if (!assignFiniteNumber(sanitized, result, field)) {
       return undefined;
     }
+  }
+  const observation = sanitizeContextWindowObservation(sanitized.contextWindowObservation);
+  if (observation === null) {
+    return undefined;
+  }
+  if (observation) {
+    result.contextWindowObservation = observation;
   }
   return Object.keys(result).length ? result : undefined;
 }

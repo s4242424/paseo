@@ -7,6 +7,21 @@ interface ProviderUsageFixturePayload {
   providers: ProviderUsage[];
 }
 
+interface PluginCatalogFixtureEntry {
+  id: string;
+  clientBundle: string;
+  requirements?: { paseo: string };
+}
+
+interface ProviderUsageFixtureOptions {
+  pluginCatalog?: PluginCatalogFixtureEntry[];
+  accountLabels?: { claude: string | null; codex: string | null };
+  accountStatuses?: {
+    claude: { state: string; email: string | null };
+    codex: { state: string; email: string | null };
+  };
+}
+
 export interface ProviderUsageFixture {
   requestCount(): number;
   waitForRequestCount(count: number): Promise<void>;
@@ -38,7 +53,10 @@ function getSessionMessage(message: WebSocketMessage): Record<string, unknown> |
   return maybeEnvelope.message as Record<string, unknown>;
 }
 
-function withProviderUsageFeature(message: WebSocketMessage): string | null {
+function withProviderUsageFeature(
+  message: WebSocketMessage,
+  pluginsEnabled: boolean,
+): string | null {
   const envelope = parseJson(message);
   if (!envelope || typeof envelope !== "object") {
     return null;
@@ -69,15 +87,64 @@ function withProviderUsageFeature(message: WebSocketMessage): string | null {
             ? payload.features
             : {}),
           providerUsageList: true,
+          ...(pluginsEnabled ? { plugins: true } : {}),
         },
       },
     },
   });
 }
 
+function providerAccountOutput(
+  method: unknown,
+  options: ProviderUsageFixtureOptions,
+): { state: string; email: string | null } | null {
+  if (method === "account.status") {
+    return (
+      options.accountStatuses?.claude ?? {
+        state: "oauth",
+        email: options.accountLabels?.claude ?? "claude@example.test",
+      }
+    );
+  }
+  if (method === "codex.account.status") {
+    return (
+      options.accountStatuses?.codex ?? {
+        state: "chatgpt",
+        email: options.accountLabels?.codex ?? "codex@example.test",
+      }
+    );
+  }
+  return null;
+}
+
+function respondToProviderAccountRpc(
+  sessionMessage: Record<string, unknown> | null,
+  options: ProviderUsageFixtureOptions,
+  send: (message: string) => void,
+): boolean {
+  if (sessionMessage?.type !== "plugin.rpc.invoke.request" || !options.pluginCatalog) return false;
+  const requestId = sessionMessage.requestId;
+  if (typeof requestId !== "string") {
+    throw new Error("plugin.rpc.invoke.request missing requestId");
+  }
+  const output = providerAccountOutput(sessionMessage.method, options);
+  if (!output) return false;
+  send(
+    JSON.stringify({
+      type: "session",
+      message: {
+        type: "plugin.rpc.invoke.response",
+        payload: { requestId, output },
+      },
+    }),
+  );
+  return true;
+}
+
 export async function installProviderUsageFixture(
   page: Page,
   payloads: ProviderUsageFixturePayload[],
+  options: ProviderUsageFixtureOptions = {},
 ): Promise<ProviderUsageFixture> {
   let requests = 0;
   const waiters: Array<{ count: number; resolve: () => void }> = [];
@@ -129,11 +196,31 @@ export async function installProviderUsageFixture(
         );
         return;
       }
+      if (sessionMessage?.type === "plugin.catalog.get.request" && options.pluginCatalog) {
+        const requestId = sessionMessage.requestId;
+        if (typeof requestId !== "string") {
+          throw new Error("plugin.catalog.get.request missing requestId");
+        }
+        ws.send(
+          JSON.stringify({
+            type: "session",
+            message: {
+              type: "plugin.catalog.get.response",
+              payload: { requestId, plugins: options.pluginCatalog },
+            },
+          }),
+        );
+        return;
+      }
+      if (respondToProviderAccountRpc(sessionMessage, options, ws.send.bind(ws))) return;
       server.send(message);
     });
 
     server.onMessage((message) => {
-      const serverInfo = typeof message === "string" ? withProviderUsageFeature(message) : null;
+      const serverInfo =
+        typeof message === "string"
+          ? withProviderUsageFeature(message, Boolean(options.pluginCatalog))
+          : null;
       ws.send(serverInfo ?? message);
     });
   });

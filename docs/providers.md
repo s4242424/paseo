@@ -177,6 +177,8 @@ promise for completion: equal results, including equal discovery timestamps, emi
 
 Provider plan usage is fetch-on-demand, not a daemon push subscription. The app calls `provider.usage.list.request` through React Query when the usage tooltip or Host Usage settings screen is shown, and the daemon returns the normalized `ProviderUsage` list directly.
 
+The conversation context popover shows the Claude and Codex entries from that host response together. It does not infer provider windows or display unrelated unavailable entries; each returned label, percentage, and reset remains provider-defined.
+
 To add plan usage for a provider, add `packages/server/src/services/quota-fetcher/providers/<provider>.ts` and register it in `packages/server/src/services/quota-fetcher/manifest.ts`. The provider file exports only its fetcher class; provider auth, endpoint constants, API schemas, and normalization helpers stay private in that file. A fetcher owns provider auth/API parsing and returns the generic shape:
 
 - `providerId`, `displayName`, `status`, and optional `planLabel`
@@ -548,6 +550,17 @@ The E2E configs in `agent-configs.ts` expose two helpers:
 Tests use `isProviderAvailable(provider)` to skip when the binary or credentials are missing, so CI will not fail for providers that are not installed.
 
 ---
+
+## Context window observations
+
+Context-window token fields remain optional usage telemetry. A provider that reports a current
+occupancy and limit must attach `contextWindowObservation` with the native session and turn IDs,
+the observation time, and a source tag. Consumers may act on a ratio only when the tag is
+`provider-confirmed`. A model manifest or catalog limit is `catalog-fallback`, never confirmation.
+If the native event cannot bind both values to the active session and turn, emit `unknown` rather
+than deriving a ratio from cumulative spend or a previous session. When a provider cannot identify
+the source turn, keep any legacy token fields unobserved: absence of
+`contextWindowObservation` is unsupported/unknown and must not trigger an action.
 
 ## Gotchas
 

@@ -48,6 +48,8 @@ interface TestPaseoDaemonOptions {
   trustedProxies?: PaseoDaemonConfig["trustedProxies"];
   agentProfiles?: AgentProfile[];
   autoArchiveAfterMerge?: boolean;
+  enableNativeSeatRotation?: boolean;
+  seatRotationPolicy?: PaseoDaemonConfig["seatRotationPolicy"];
   pluginsEnabled?: PaseoDaemonConfig["pluginsEnabled"];
   plugins?: PaseoDaemonConfig["plugins"];
 }
@@ -201,6 +203,8 @@ async function prepareTestDaemonConfig(
     downloadTokenTtlMs: options.downloadTokenTtlMs,
     agentProfiles: options.agentProfiles,
     autoArchiveAfterMerge: options.autoArchiveAfterMerge,
+    enableNativeSeatRotation: options.enableNativeSeatRotation,
+    seatRotationPolicy: options.seatRotationPolicy,
     pluginsEnabled: options.pluginsEnabled,
     plugins: options.plugins,
   };

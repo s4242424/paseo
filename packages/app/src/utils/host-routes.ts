@@ -363,13 +363,15 @@ export function buildHostWorkspaceOpenRoute(
   serverId: string,
   workspaceId: string,
   openIntent: string,
+  preserveSeatRotation = false,
 ) {
   const base = buildHostWorkspaceRoute(serverId, workspaceId);
   const normalizedOpenIntent = trimNonEmpty(openIntent);
   if (base === "/" || !normalizedOpenIntent) {
     return base;
   }
-  return `${base}?open=${encodeURIComponent(normalizedOpenIntent)}` as const;
+  const history = preserveSeatRotation ? "&history=1" : "";
+  return `${base}?open=${encodeURIComponent(normalizedOpenIntent)}${history}` as const;
 }
 
 export function buildHostAgentDetailRoute(serverId: string, agentId: string, workspaceId?: string) {

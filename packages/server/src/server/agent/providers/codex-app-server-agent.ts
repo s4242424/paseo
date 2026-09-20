@@ -52,6 +52,7 @@ import { z } from "zod";
 import { renderPromptAttachmentAsText } from "../prompt-attachments.js";
 import { composeSystemPromptParts } from "../system-prompt.js";
 import { curateAgentActivity } from "../activity-curator.js";
+import { CodexAsyncQuestions, codexAsyncQuestionToTimeline } from "./codex/async-questions.js";
 import {
   mapCodexToolCallEnvelope,
   mapCodexToolCallFromThreadItem,
@@ -1845,6 +1846,17 @@ function mapCodexThreadImageItem(
   );
 }
 
+function mapCodexAgentMessage(item: Record<string, unknown>): AgentTimelineItem {
+  const question = codexAsyncQuestionToTimeline(item);
+  if (question) return question;
+  const messageId = nonEmptyString(item.id);
+  return {
+    type: "assistant_message",
+    text: typeof item.text === "string" ? item.text : "",
+    ...(messageId ? { messageId } : {}),
+  };
+}
+
 export function threadItemToTimeline(
   item: unknown,
   options?: { includeUserMessage?: boolean; cwd?: string | null },
@@ -1871,14 +1883,8 @@ export function threadItemToTimeline(
   switch (normalizedType) {
     case "userMessage":
       return mapCodexThreadUserMessageItem(normalizedItem, includeUserMessage);
-    case "agentMessage": {
-      const messageId = nonEmptyString(normalizedItem.id);
-      return {
-        type: "assistant_message",
-        text: typeof normalizedItem.text === "string" ? normalizedItem.text : "",
-        ...(messageId ? { messageId } : {}),
-      };
-    }
+    case "agentMessage":
+      return mapCodexAgentMessage(normalizedItem);
     case "plan":
       return mapCodexThreadPlanItem(normalizedItem);
     case "reasoning":
@@ -2154,7 +2160,8 @@ const TurnDiffUpdatedNotificationSchema = z
 
 const ThreadTokenUsageUpdatedNotificationSchema = z
   .object({
-    threadId: z.string().optional(),
+    threadId: z.string(),
+    turnId: z.string(),
     tokenUsage: z.unknown(),
   })
   .passthrough();
@@ -2419,7 +2426,7 @@ type ParsedCodexNotification =
       threadId: string | null;
     }
   | { kind: "diff_updated"; diff: string; threadId: string | null }
-  | { kind: "token_usage_updated"; tokenUsage: unknown; threadId: string | null }
+  | { kind: "token_usage_updated"; tokenUsage: unknown; threadId: string; turnId: string }
   | { kind: "agent_message_delta"; itemId: string; delta: string; threadId: string | null }
   | { kind: "reasoning_delta"; itemId: string; delta: string; threadId: string | null }
   | {
@@ -2617,7 +2624,8 @@ const CodexNotificationSchema = z.union([
       ({ params }): ParsedCodexNotification => ({
         kind: "token_usage_updated",
         tokenUsage: params.tokenUsage,
-        threadId: params.threadId ?? null,
+        threadId: params.threadId,
+        turnId: params.turnId,
       }),
     ),
   z.object({ method: z.literal("thread/tokenUsage/updated"), params: z.unknown() }).transform(
@@ -3293,6 +3301,7 @@ export class CodexAppServerAgentSession implements AgentSession {
 
   private readonly logger: Logger;
   private readonly config: AgentSessionConfig;
+  private readonly asyncQuestions: CodexAsyncQuestions;
   private currentMode: string;
   private hasWorkflowModeOverride: boolean;
   private readonly providerOptions: CodexProviderOptions;
@@ -3405,6 +3414,7 @@ export class CodexAppServerAgentSession implements AgentSession {
     this.currentMode = config.modeId ?? DEFAULT_CODEX_MODE_ID;
     this.providerOptions = CodexProviderOptionsSchema.parse(config.providerOptions ?? {});
     this.config = config;
+    this.asyncQuestions = new CodexAsyncQuestions(resumeHandle?.metadata?.asyncQuestions);
     this.config.thinkingOptionId = normalizeCodexThinkingOptionId(this.config.thinkingOptionId);
     if (this.config.featureValues?.fast_mode && codexModelSupportsFastMode(this.config.model)) {
       this.serviceTier = "fast";
@@ -3799,6 +3809,9 @@ export class CodexAppServerAgentSession implements AgentSession {
     }
     this.resetCodexUserMessageTurns();
     for (const entry of timeline) {
+      if (entry.item.type === "tool_call" && entry.item.name === "request_user_input_async") {
+        entry.item = this.asyncQuestions.timeline(entry.item.callId) ?? entry.item;
+      }
       if (entry.item.type === "user_message") {
         this.rememberCodexUserMessageTurn(entry.item.messageId, entry.providerTurnId);
       }
@@ -4197,6 +4210,7 @@ export class CodexAppServerAgentSession implements AgentSession {
       const turnStart = await this.buildTurnStartParams(effectivePrompt, options);
       const turnId = this.createTurnId();
       this.activeForegroundTurnId = turnId;
+      this.latestUsage = undefined;
       this.activeClientMessageId = options?.clientMessageId ?? null;
       this.currentTurnId = null;
       this.pendingForegroundTurnIdentification?.resolve(null);
@@ -4464,13 +4478,16 @@ export class CodexAppServerAgentSession implements AgentSession {
   }
 
   getPendingPermissions(): AgentPermissionRequest[] {
-    return Array.from(this.pendingPermissions.values());
+    return [...this.pendingPermissions.values(), ...this.asyncQuestions.pending()];
   }
 
   async respondToPermission(
     requestId: string,
     response: AgentPermissionResponse,
   ): Promise<AgentPermissionResult | void> {
+    if (this.asyncQuestions.hasPending(requestId)) {
+      return this.respondToAsyncQuestion(requestId, response);
+    }
     const pending = this.pendingPermissionHandlers.get(requestId);
     if (!pending) {
       throw new Error(`No pending Codex app-server permission request with id '${requestId}'`);
@@ -4562,6 +4579,33 @@ export class CodexAppServerAgentSession implements AgentSession {
       }),
     });
     pending.resolve({ answers: {} });
+  }
+
+  private async respondToAsyncQuestion(
+    requestId: string,
+    response: AgentPermissionResponse,
+  ): Promise<AgentPermissionResult | void> {
+    const prepared = this.asyncQuestions.prepareResponse(requestId, response);
+    let followUpPrompt = prepared.prompt;
+    const expectedTurnId = this.activeForegroundTurnId;
+    if (prepared.prompt && expectedTurnId) {
+      const result = await this.steerActiveTurn(prepared.prompt, {
+        expectedTurnId,
+        clientMessageId: randomUUID(),
+      });
+      if (result.status !== "accepted") {
+        throw new Error("The active Codex turn changed. Retry sending your answer.");
+      }
+      followUpPrompt = undefined;
+    }
+    this.emitEvent({ type: "timeline", provider: CODEX_PROVIDER, item: prepared.complete() });
+    this.emitEvent({
+      type: "permission_resolved",
+      provider: CODEX_PROVIDER,
+      requestId,
+      resolution: response,
+    });
+    return followUpPrompt ? { followUpPrompt } : undefined;
   }
 
   private handlePlanPermissionResponse(params: {
@@ -4700,6 +4744,7 @@ export class CodexAppServerAgentSession implements AgentSession {
         toolPolicy: this.config.toolPolicy,
         systemPrompt: this.config.systemPrompt,
         mcpServers: this.config.mcpServers,
+        asyncQuestions: this.asyncQuestions.serialize(),
       },
     };
   }
@@ -4729,6 +4774,7 @@ export class CodexAppServerAgentSession implements AgentSession {
         this.persistedHistory = [];
         this.historyPending = false;
         await this.loadPersistedHistory();
+        this.reconcileAsyncQuestionsAfterRewind();
       },
     });
   }
@@ -5853,6 +5899,7 @@ export class CodexAppServerAgentSession implements AgentSession {
     parsed: Extract<ParsedCodexNotification, { kind: "thread_started" }>,
   ): void {
     this.currentThreadId = parsed.threadId;
+    this.latestUsage = undefined;
     this.emitEvent({
       type: "thread_started",
       provider: CODEX_PROVIDER,
@@ -5903,6 +5950,7 @@ export class CodexAppServerAgentSession implements AgentSession {
         error: parsed.errorMessage ?? "Codex turn failed",
       });
     } else if (parsed.status === "interrupted") {
+      this.dismissInterruptedAsyncQuestions();
       this.emitEvent({ type: "turn_canceled", provider: CODEX_PROVIDER, reason: "interrupted" });
     } else {
       if (this.planModeEnabled && this.latestPlanResult?.text) {
@@ -5973,7 +6021,41 @@ export class CodexAppServerAgentSession implements AgentSession {
   private handleTokenUsageUpdatedNotification(
     parsed: Extract<ParsedCodexNotification, { kind: "token_usage_updated" }>,
   ): void {
-    this.latestUsage = toAgentUsage(parsed.tokenUsage);
+    if (
+      !this.currentThreadId ||
+      !this.currentTurnId ||
+      !this.activeForegroundTurnId ||
+      parsed.threadId !== this.currentThreadId ||
+      parsed.turnId !== this.currentTurnId
+    ) {
+      this.logger.debug(
+        {
+          eventThreadId: parsed.threadId,
+          eventTurnId: parsed.turnId,
+          currentThreadId: this.currentThreadId,
+          currentTurnId: this.currentTurnId,
+        },
+        "Ignoring Codex token usage without a current native thread and turn match",
+      );
+      return;
+    }
+    const usage = toAgentUsage(parsed.tokenUsage);
+    if (!usage) return;
+    this.latestUsage = {
+      ...usage,
+      ...(usage.contextWindowUsedTokens !== undefined && usage.contextWindowMaxTokens !== undefined
+        ? {
+            contextWindowObservation: {
+              sessionId: this.currentThreadId,
+              turnId: this.activeForegroundTurnId,
+              observedAt: new Date().toISOString(),
+              contextWindowSource: "provider-confirmed" as const,
+              usedTokens: usage.contextWindowUsedTokens,
+              maxTokens: usage.contextWindowMaxTokens,
+            },
+          }
+        : {}),
+    };
     if (this.latestUsage) {
       this.notifySubscribers({
         type: "usage_updated",
@@ -6255,6 +6337,43 @@ export class CodexAppServerAgentSession implements AgentSession {
     }
   }
 
+  private receiveAsyncQuestion(threadId: string | null, item: unknown): void {
+    if (threadId !== this.currentThreadId) return;
+    const request = this.asyncQuestions.receive(item);
+    if (request)
+      this.emitEvent({ type: "permission_requested", provider: CODEX_PROVIDER, request });
+  }
+
+  private dismissInterruptedAsyncQuestions(): void {
+    const resolution: AgentPermissionResponse = { behavior: "deny", message: "Interrupted" };
+    for (const request of this.asyncQuestions.pending()) {
+      const prepared = this.asyncQuestions.prepareResponse(request.id, resolution);
+      this.emitEvent({ type: "timeline", provider: CODEX_PROVIDER, item: prepared.complete() });
+      this.emitEvent({
+        type: "permission_resolved",
+        provider: CODEX_PROVIDER,
+        requestId: request.id,
+        resolution,
+      });
+    }
+  }
+
+  private reconcileAsyncQuestionsAfterRewind(): void {
+    const retainedIds = new Set(
+      this.persistedHistory.flatMap(({ item }) =>
+        item.type === "tool_call" && item.name === "request_user_input_async" ? [item.callId] : [],
+      ),
+    );
+    for (const requestId of this.asyncQuestions.retain(retainedIds)) {
+      this.emitEvent({
+        type: "permission_resolved",
+        provider: CODEX_PROVIDER,
+        requestId,
+        resolution: { behavior: "deny", message: "Removed by rewind" },
+      });
+    }
+  }
+
   private handleItemCompletedNotification(
     parsed: Extract<ParsedCodexNotification, { kind: "item_completed" }>,
   ): void {
@@ -6265,6 +6384,7 @@ export class CodexAppServerAgentSession implements AgentSession {
     if (shouldIgnoreMirroredLifecycleItem(parsed.source, parsed.item)) {
       return;
     }
+    this.receiveAsyncQuestion(parsed.threadId, parsed.item);
     if (this.isUserMessageItem(parsed.item)) {
       this.handleUserMessageItem(parsed);
       return;

@@ -28,7 +28,8 @@ import { FadeIn, FadeOut } from "react-native-reanimated";
 import { StyleSheet } from "react-native-unistyles";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { FloatingSurface } from "@/components/ui/floating";
-import { isWeb } from "@/constants/platform";
+import { isNative, isWeb } from "@/constants/platform";
+import { useHoverSafeZone } from "@/hooks/use-hover-safe-zone";
 import { getOverlayRoot, OVERLAY_Z } from "@/lib/overlay-root";
 
 type Side = "top" | "bottom" | "left" | "right";
@@ -44,10 +45,14 @@ interface Rect {
 interface TooltipContextValue {
   open: boolean;
   setOpen: (open: boolean) => void;
+  cancelClose: () => void;
+  scheduleClose: () => void;
   triggerRef: React.RefObject<View | null>;
+  contentRef: React.RefObject<View | null>;
   enabled: boolean;
   openOnPress: boolean;
   delayDuration: number;
+  interactive: boolean;
 }
 
 const TooltipContext = createContext<TooltipContextValue | null>(null);
@@ -231,6 +236,7 @@ export function Tooltip({
   delayDuration = 0,
   enabledOnDesktop = true,
   enabledOnMobile = false,
+  interactive = false,
   children,
 }: PropsWithChildren<{
   open?: boolean;
@@ -239,27 +245,75 @@ export function Tooltip({
   delayDuration?: number;
   enabledOnDesktop?: boolean;
   enabledOnMobile?: boolean;
+  /** Keeps the popover open while its content receives pointer or keyboard focus. */
+  interactive?: boolean;
 }>): ReactElement {
   const triggerRef = useRef<View>(null);
+  const contentRef = useRef<View>(null);
   const [isOpen, setIsOpen] = useControllableOpenState({
     open,
     defaultOpen,
     onOpenChange,
   });
+  const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const cancelClose = useCallback(() => {
+    if (closeTimerRef.current) {
+      clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    }
+  }, []);
+
+  const scheduleClose = useCallback(() => {
+    cancelClose();
+    if (!interactive) {
+      setIsOpen(false);
+      return;
+    }
+    closeTimerRef.current = setTimeout(() => {
+      closeTimerRef.current = null;
+      // Pointer and RN hover events can arrive in different orders. Recheck the
+      // live target before a delayed leave closes content the user has entered.
+      if (isWeb) {
+        const nodes = [triggerRef.current, contentRef.current] as unknown as (HTMLElement | null)[];
+        if (
+          nodes.some(
+            (node) => node && (node.matches(":hover") || node.contains(document.activeElement)),
+          )
+        )
+          return;
+      }
+      setIsOpen(false);
+    }, 120);
+  }, [cancelClose, interactive, setIsOpen]);
+
+  useEffect(() => cancelClose, [cancelClose]);
 
   const isCompact = useIsCompactFormFactor();
   const enabled = isCompact ? enabledOnMobile : enabledOnDesktop;
+
+  useHoverSafeZone({
+    enabled: interactive && isOpen && !isCompact,
+    triggerRef,
+    contentRef,
+    onEnterSafeZone: cancelClose,
+    onLeaveSafeZone: scheduleClose,
+  });
 
   const value = useMemo<TooltipContextValue>(
     () => ({
       open: isOpen,
       setOpen: setIsOpen,
+      cancelClose,
+      scheduleClose,
       triggerRef,
+      contentRef,
       enabled,
-      openOnPress: isCompact,
+      openOnPress: isCompact || (isNative && interactive),
       delayDuration,
+      interactive,
     }),
-    [isOpen, setIsOpen, enabled, isCompact, delayDuration],
+    [isOpen, setIsOpen, cancelClose, scheduleClose, enabled, isCompact, delayDuration, interactive],
   );
 
   return <TooltipContext.Provider value={value}>{children}</TooltipContext.Provider>;
@@ -292,6 +346,7 @@ export function TooltipTrigger({
 
   const scheduleOpen = useCallback(() => {
     if (!ctx.enabled || disabled) return;
+    ctx.cancelClose();
     clearOpenTimer();
     if (ctx.delayDuration <= 0) {
       ctx.setOpen(true);
@@ -305,7 +360,7 @@ export function TooltipTrigger({
 
   const close = useCallback(() => {
     clearOpenTimer();
-    ctx.setOpen(false);
+    ctx.scheduleClose();
   }, [clearOpenTimer, ctx]);
 
   useEffect(() => {
@@ -508,6 +563,8 @@ export function TooltipContent({
   const contentStyle = useMemo(() => [styles.content, style], [style]);
 
   const handleDismiss = useCallback(() => ctx.setOpen(false), [ctx]);
+  const handleContentHoverIn = useCallback(() => ctx.cancelClose(), [ctx]);
+  const handleContentHoverOut = useCallback(() => ctx.scheduleClose(), [ctx]);
 
   if (!ctx.open || !ctx.enabled) return null;
 
@@ -516,19 +573,28 @@ export function TooltipContent({
   // exact same positioning math as DropdownMenu, without hover feedback loops.
   if (isWeb) {
     return createPortal(
-      <View pointerEvents="none" style={styles.portalOverlay}>
-        <FloatingSurface
-          pointerEvents="none"
-          entering={FadeIn.duration(80)}
-          exiting={FadeOut.duration(80)}
+      <View pointerEvents={ctx.interactive ? "box-none" : "none"} style={styles.portalOverlay}>
+        <View
+          ref={ctx.contentRef}
+          pointerEvents={ctx.interactive ? "auto" : "none"}
           collapsable={false}
-          testID={testID}
+          onBlur={ctx.interactive ? handleContentHoverOut : undefined}
+          onFocus={ctx.interactive ? handleContentHoverIn : undefined}
           onLayout={handleLayout}
-          style={contentStyle}
-          frameStyle={frameStyle}
+          onPointerEnter={ctx.interactive ? handleContentHoverIn : undefined}
+          onPointerLeave={ctx.interactive ? handleContentHoverOut : undefined}
+          style={frameStyle}
         >
-          {children}
-        </FloatingSurface>
+          <FloatingSurface
+            entering={FadeIn.duration(80)}
+            exiting={FadeOut.duration(80)}
+            collapsable={false}
+            testID={testID}
+            style={contentStyle}
+          >
+            {children}
+          </FloatingSurface>
+        </View>
       </View>,
       getOverlayRoot(),
     );
@@ -542,26 +608,41 @@ export function TooltipContent({
       statusBarTranslucent={Platform.OS === "android"}
       onRequestClose={handleDismiss}
     >
-      <Pressable style={styles.overlay} onPress={handleDismiss}>
-        <FloatingSurface
-          pointerEvents="none"
-          entering={FadeIn.duration(80)}
-          exiting={FadeOut.duration(80)}
+      <View style={styles.overlay}>
+        <Pressable style={styles.dismissOverlay} onPress={handleDismiss} />
+        <View
+          ref={ctx.contentRef}
+          pointerEvents={ctx.interactive ? "auto" : "none"}
           collapsable={false}
-          testID={testID}
+          onBlur={ctx.interactive ? handleContentHoverOut : undefined}
+          onFocus={ctx.interactive ? handleContentHoverIn : undefined}
           onLayout={handleLayout}
-          style={contentStyle}
-          frameStyle={frameStyle}
+          style={frameStyle}
         >
-          {children}
-        </FloatingSurface>
-      </Pressable>
+          <FloatingSurface
+            entering={FadeIn.duration(80)}
+            exiting={FadeOut.duration(80)}
+            collapsable={false}
+            testID={testID}
+            style={contentStyle}
+          >
+            {children}
+          </FloatingSurface>
+        </View>
+      </View>
     </Modal>
   );
 }
 
 const styles = StyleSheet.create((theme) => ({
   overlay: { flex: 1 },
+  dismissOverlay: {
+    position: "absolute",
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+  },
   portalOverlay: {
     position: "absolute",
     top: 0,

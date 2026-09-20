@@ -1,5 +1,7 @@
 import type { SessionEventSubscription } from "@getpaseo/protocol/messages";
 import type { AgentRequests } from "./agent/requests/index.js";
+import { NativeSeatRotationService } from "./agent/native-seat-rotation.js";
+import { SeatRotationPolicy } from "./agent/seat-rotation-policy.js";
 import equal from "fast-deep-equal";
 import { v4 as uuidv4 } from "uuid";
 import { lstat, mkdir, mkdtemp, rename, rm, stat } from "node:fs/promises";
@@ -230,6 +232,7 @@ import {
 import type { ForgeService } from "../services/forge-service.js";
 import type { ProviderUsageService } from "../services/quota-fetcher/service.js";
 import {
+  resolveWorkspaceRootAgent,
   summarizeFetchWorkspacesEntries,
   workspaceIdsOnCheckout,
   WorkspaceDirectory,
@@ -463,6 +466,9 @@ export interface SessionOptions {
   worktreesRoot?: string;
   agentManager: AgentManager;
   agentStorage: AgentStorage;
+  /** Daemon-owned: all socket sessions must share one operation coordinator. */
+  nativeSeatRotation: NativeSeatRotationService;
+  seatRotationPolicy: SeatRotationPolicy;
   agentRequests: Pick<AgentRequests, "create" | "send">;
   projectRegistry: ProjectRegistry;
   workspaceRegistry: WorkspaceRegistry;
@@ -754,6 +760,8 @@ export class Session {
   private readonly hubExecutionController: HubExecutionController | null;
   private readonly workspaceScripts: WorkspaceScriptsService;
   private readonly agentRequests: Pick<AgentRequests, "create" | "send">;
+  private readonly nativeSeatRotation: NativeSeatRotationService;
+  private readonly seatRotationPolicy: SeatRotationPolicy;
   private readonly createAgentLifecycleDispatch: CreateAgentLifecycleDispatch;
 
   constructor(options: SessionOptions) {
@@ -828,6 +836,8 @@ export class Session {
     this.pushNotifications = pushNotifications;
     this.paseoHome = paseoHome;
     this.agentRequests = options.agentRequests;
+    this.nativeSeatRotation = options.nativeSeatRotation;
+    this.seatRotationPolicy = options.seatRotationPolicy;
     this.projectIcons = new ProjectIconReader(paseoHome);
     this.worktreesRoot = worktreesRoot;
     this.pluginRuntime = pluginRuntime;
@@ -2001,6 +2011,7 @@ export class Session {
       this.dispatchAgentRelationshipMessage(msg) ??
       this.dispatchAgentTimelineMessage(msg, source) ??
       this.dispatchHubExecutionMessage(msg) ??
+      this.dispatchAgentSeatRotationMessage(msg) ??
       this.dispatchAgentLifecycleMessage(msg) ??
       this.dispatchAgentConfigMessage(msg) ??
       this.dispatchCheckoutMessage(msg) ??
@@ -2018,7 +2029,7 @@ export class Session {
 
   private dispatchWorkspaceLifecycleMessage(msg: SessionInboundMessage): Promise<void> | undefined {
     return (
-      this.dispatchWorkspaceRecoveryMessage(msg) ??
+      this.dispatchWorkspaceStateMessage(msg) ??
       this.dispatchWorkspaceLabelMessage(msg) ??
       this.dispatchWorkspaceSetupMessage(msg) ??
       this.dispatchWorkspaceAndProjectMessage(msg)
@@ -2429,6 +2440,23 @@ export class Session {
     }
   }
 
+  private dispatchAgentSeatRotationMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    switch (msg.type) {
+      case "agent.seat_rotation.request":
+        return this.handleAgentSeatRotationRequest(msg);
+      case "agent.seat_rotation.cancel.request":
+        return this.handleAgentSeatRotationCancelRequest(msg);
+      case "agent.seat_rotation.inspect.request":
+        return this.handleAgentSeatRotationInspectRequest(msg);
+      case "agent.seat_rotation.predecessor.inspect.request":
+        return this.handleAgentSeatRotationPredecessorInspectRequest(msg);
+      case "agent.seat_rotation.policy.inspect.request":
+        return this.handleAgentSeatRotationPolicyInspectRequest(msg);
+      default:
+        return undefined;
+    }
+  }
+
   private dispatchAgentConfigMessage(msg: SessionInboundMessage): Promise<void> | undefined {
     switch (msg.type) {
       case "set_agent_mode_request":
@@ -2582,8 +2610,6 @@ export class Session {
         return this.handleProjectRemoveRequest(msg);
       case "workspace.create.request":
         return this.handleWorkspaceCreateRequest(msg);
-      case "workspace.clear_attention.request":
-        return this.handleWorkspaceClearAttentionRequest(msg);
       case "workspace.title.set.request":
         return this.handleWorkspaceTitleSetRequest(msg.workspaceId, msg.title, msg.requestId);
       case "workspace.pin.set.request":
@@ -2656,12 +2682,16 @@ export class Session {
     }
   }
 
-  private dispatchWorkspaceRecoveryMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+  private dispatchWorkspaceStateMessage(msg: SessionInboundMessage): Promise<void> | undefined {
     switch (msg.type) {
       case "workspace.recovery.inspect.request":
         return this.handleWorkspaceRecoveryInspectRequest(msg);
       case "workspace.recovery.restore.request":
         return this.handleWorkspaceRecoveryRestoreRequest(msg);
+      case "workspace.clear_attention.request":
+        return this.handleWorkspaceClearAttentionRequest(msg);
+      case "workspace.mark_unread.request":
+        return this.handleWorkspaceMarkUnreadRequest(msg);
       default:
         return undefined;
     }
@@ -4032,6 +4062,33 @@ export class Session {
     this.sessionLogger.info({ agentId }, `Cancel request received for agent ${agentId}`);
 
     try {
+      const policyStop = await this.seatRotationPolicy.cancelForPredecessor(agentId);
+      if (policyStop) {
+        if (requestId) {
+          const agent = this.agentManager.getAgent(agentId);
+          const payload = agent ? await this.buildAgentPayload(agent) : null;
+          this.emit({
+            type: "cancel_agent_response",
+            payload: { requestId, agentId, agent: payload, error: null },
+          });
+        }
+        return;
+      }
+      const rotationStop = await this.nativeSeatRotation.cancelForPredecessor(agentId);
+      if (rotationStop) {
+        if (rotationStop.operation?.state === "cancel_uncertain") {
+          throw new Error("native rotation Stop is uncertain and remains recoverable");
+        }
+        if (requestId) {
+          const agent = this.agentManager.getAgent(agentId);
+          const payload = agent ? await this.buildAgentPayload(agent) : null;
+          this.emit({
+            type: "cancel_agent_response",
+            payload: { requestId, agentId, agent: payload, error: null },
+          });
+        }
+        return;
+      }
       await cancelAgentRunCommand(
         { agentManager: this.agentManager, logger: this.sessionLogger },
         agentId,
@@ -7026,6 +7083,64 @@ export class Session {
     });
   }
 
+  private async handleWorkspaceMarkUnreadRequest(
+    request: Extract<SessionInboundMessage, { type: "workspace.mark_unread.request" }>,
+  ): Promise<void> {
+    const { requestId, workspaceId } = request;
+    let markedAgentId: string | null = null;
+    try {
+      const workspace = await this.workspaceRegistry.get(workspaceId);
+      if (!workspace || workspace.archivedAt) {
+        throw new Error(`Workspace not found: ${workspaceId}`);
+      }
+
+      const agents = (await this.listAgentPayloads()).filter((agent) =>
+        this.isProviderVisibleToClient(agent.provider),
+      );
+      const agentsById = new Map(agents.map((agent) => [agent.id, agent] as const));
+      const candidates = agents
+        .filter((agent) => !agent.archivedAt && agent.workspaceId === workspace.workspaceId)
+        .filter((agent) => resolveWorkspaceRootAgent(agent, agentsById)?.id === agent.id)
+        .filter((agent) => agent.status === "idle" || agent.status === "closed")
+        .filter((agent) => agent.requiresAttention !== true)
+        .filter((agent) => (agent.pendingPermissions?.length ?? 0) === 0)
+        .sort(
+          (left, right) =>
+            right.updatedAt.localeCompare(left.updatedAt) || left.id.localeCompare(right.id),
+        );
+      const candidate = candidates[0];
+      if (!candidate) {
+        throw new Error(`Workspace has no finished agent to mark unread: ${workspaceId}`);
+      }
+
+      await this.agentManager.markAgentUnread(candidate.id);
+      markedAgentId = candidate.id;
+      this.emit({
+        type: "workspace.mark_unread.response",
+        payload: {
+          requestId,
+          workspaceId,
+          markedAgentId,
+          success: true,
+          error: null,
+        },
+      });
+    } catch (error) {
+      const message = getErrorMessage(error);
+      this.sessionLogger.error({ err: error, workspaceId }, "Failed to mark workspace unread");
+      this.emit({
+        type: "workspace.mark_unread.response",
+        payload: {
+          requestId,
+          workspaceId,
+          markedAgentId,
+          success: false,
+          error: message,
+        },
+      });
+    }
+  }
+
   private async handleFetchAgent(agentIdOrIdentifier: string, requestId: string): Promise<void> {
     const resolved = await this.resolveAgentIdentifier(agentIdOrIdentifier);
     if (!resolved.ok) {
@@ -7586,6 +7701,199 @@ export class Session {
           requestId: msg.requestId,
           agentId: resolved.agentId,
           accepted: false,
+          error: errorToFriendlyMessage(error),
+        },
+      });
+    }
+  }
+
+  private async handleAgentSeatRotationRequest(
+    msg: Extract<SessionInboundMessage, { type: "agent.seat_rotation.request" }>,
+  ): Promise<void> {
+    try {
+      const result = await this.nativeSeatRotation.rotate({
+        operationId: msg.operationId,
+        predecessorId: msg.predecessorId,
+        generation: msg.generation,
+        handoverRoot: msg.handoverRoot,
+        checkpointPath: msg.checkpointPath,
+        resumePrompt: msg.resumePrompt,
+      });
+      this.emit({
+        type: "agent.seat_rotation.response",
+        payload: {
+          requestId: msg.requestId,
+          accepted: result.accepted,
+          state: result.operation.state,
+          successorId: result.operation.successorId ?? null,
+          error: null,
+        },
+      });
+    } catch (error) {
+      this.emit({
+        type: "agent.seat_rotation.response",
+        payload: {
+          requestId: msg.requestId,
+          accepted: false,
+          state: null,
+          successorId: null,
+          error: errorToFriendlyMessage(error),
+        },
+      });
+    }
+  }
+
+  private async handleAgentSeatRotationCancelRequest(
+    msg: Extract<SessionInboundMessage, { type: "agent.seat_rotation.cancel.request" }>,
+  ): Promise<void> {
+    try {
+      if (msg.predecessorId) {
+        const resolved = await this.resolveAgentIdentifier(msg.predecessorId);
+        if (!resolved.ok || resolved.agentId !== msg.predecessorId) {
+          throw new Error("rotation predecessor is unknown");
+        }
+        if (await this.seatRotationPolicy.cancelForPredecessor(msg.predecessorId)) {
+          this.emit({
+            type: "agent.seat_rotation.cancel.response",
+            payload: {
+              requestId: msg.requestId,
+              accepted: true,
+              state: "cancelled",
+              successorId: null,
+              error: null,
+            },
+          });
+          return;
+        }
+      }
+      const result = await this.nativeSeatRotation.cancel(msg.operationId, msg.predecessorId);
+      this.emit({
+        type: "agent.seat_rotation.cancel.response",
+        payload: {
+          requestId: msg.requestId,
+          accepted: result.accepted,
+          state: result.operation?.state ?? "cancel_intent",
+          successorId: result.operation?.successorId ?? null,
+          error: null,
+        },
+      });
+    } catch (error) {
+      this.emit({
+        type: "agent.seat_rotation.cancel.response",
+        payload: {
+          requestId: msg.requestId,
+          accepted: false,
+          state: null,
+          successorId: null,
+          error: errorToFriendlyMessage(error),
+        },
+      });
+    }
+  }
+
+  private async handleAgentSeatRotationInspectRequest(
+    msg: Extract<SessionInboundMessage, { type: "agent.seat_rotation.inspect.request" }>,
+  ): Promise<void> {
+    try {
+      const state = await this.nativeSeatRotation.inspect(msg.operationId);
+      this.emit({
+        type: "agent.seat_rotation.inspect.response",
+        payload: {
+          requestId: msg.requestId,
+          operationId: msg.operationId,
+          phase: state?.phase ?? null,
+          successorId: state?.successorId ?? null,
+          workspaceId: state?.workspaceId ?? null,
+          sourceRevision: state?.sourceRevision ?? null,
+          revision: state?.revision ?? null,
+          failureCode: state?.failureCode ?? null,
+          error: null,
+        },
+      });
+    } catch (error) {
+      this.emit({
+        type: "agent.seat_rotation.inspect.response",
+        payload: {
+          requestId: msg.requestId,
+          operationId: msg.operationId,
+          phase: null,
+          successorId: null,
+          workspaceId: null,
+          sourceRevision: null,
+          revision: null,
+          failureCode: null,
+          error: errorToFriendlyMessage(error),
+        },
+      });
+    }
+  }
+
+  private async handleAgentSeatRotationPredecessorInspectRequest(
+    msg: Extract<
+      SessionInboundMessage,
+      { type: "agent.seat_rotation.predecessor.inspect.request" }
+    >,
+  ): Promise<void> {
+    try {
+      const resolved = await this.resolveAgentIdentifier(msg.predecessorId);
+      if (!resolved.ok || resolved.agentId !== msg.predecessorId) {
+        throw new Error("rotation predecessor is unknown");
+      }
+      const state = await this.nativeSeatRotation.inspectByPredecessor(msg.predecessorId);
+      this.emit({
+        type: "agent.seat_rotation.predecessor.inspect.response",
+        payload: {
+          requestId: msg.requestId,
+          operationId: state?.operationId ?? null,
+          phase: state?.phase ?? null,
+          successorId: state?.successorId ?? null,
+          workspaceId: state?.workspaceId ?? null,
+          sourceRevision: state?.sourceRevision ?? null,
+          revision: state?.revision ?? null,
+          failureCode: state?.failureCode ?? null,
+          error: null,
+        },
+      });
+    } catch (error) {
+      this.emit({
+        type: "agent.seat_rotation.predecessor.inspect.response",
+        payload: {
+          requestId: msg.requestId,
+          operationId: null,
+          phase: null,
+          successorId: null,
+          workspaceId: null,
+          sourceRevision: null,
+          revision: null,
+          failureCode: null,
+          error: errorToFriendlyMessage(error),
+        },
+      });
+    }
+  }
+
+  private async handleAgentSeatRotationPolicyInspectRequest(
+    msg: Extract<SessionInboundMessage, { type: "agent.seat_rotation.policy.inspect.request" }>,
+  ): Promise<void> {
+    try {
+      const resolved = await this.resolveAgentIdentifier(msg.predecessorId);
+      if (!resolved.ok || resolved.agentId !== msg.predecessorId) {
+        throw new Error("rotation predecessor is unknown");
+      }
+      const state = await this.seatRotationPolicy.inspectByPredecessor(msg.predecessorId);
+      this.emit({
+        type: "agent.seat_rotation.policy.inspect.response",
+        payload: { requestId: msg.requestId, ...state, error: null },
+      });
+    } catch (error) {
+      this.emit({
+        type: "agent.seat_rotation.policy.inspect.response",
+        payload: {
+          requestId: msg.requestId,
+          operationId: null,
+          phase: null,
+          reason: null,
+          goalContinuation: null,
           error: errorToFriendlyMessage(error),
         },
       });

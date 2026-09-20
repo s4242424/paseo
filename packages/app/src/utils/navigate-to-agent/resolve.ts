@@ -9,6 +9,7 @@ export interface NavigateToAgentInput {
   // (cold deep-links). Otherwise the workspace is read from the store.
   workspaceId?: string | null;
   pin?: boolean;
+  preserveSeatRotation?: boolean;
 }
 
 export interface AgentNavTarget {
@@ -41,5 +42,6 @@ export function resolveNavigateToAgent(
     workspaceId,
     target: { kind: "agent", agentId: input.agentId },
     pin: input.pin,
+    preserveSeatRotation: input.preserveSeatRotation,
   });
 }

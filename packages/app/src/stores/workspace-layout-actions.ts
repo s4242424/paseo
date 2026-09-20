@@ -263,10 +263,16 @@ export interface WorkspaceTabSnapshot {
   activeAgentIds: Iterable<string>;
   autoOpenAgentIds: Iterable<string>;
   knownAgentIds: Iterable<string>;
+  /** Agent tabs whose durable successor linkage is still being reconciled. */
+  continuityAgentIds?: Iterable<string>;
   knownTerminalIds?: Iterable<string>;
   standaloneTerminalIds: Iterable<string>;
   hasActivePendingTerminalCreate?: boolean;
   hasActivePendingDraftCreate?: boolean;
+}
+
+function continuityAgentIdsFor(snapshot: WorkspaceTabSnapshot): Set<string> {
+  return normalizeStringSet(snapshot.continuityAgentIds ?? []);
 }
 
 export const DEFAULT_PANE_ID = "main";
@@ -1660,6 +1666,11 @@ export function retargetTabInLayout(
     currentTab?.target.kind === "draft"
       ? input.tabId
       : buildDeterministicWorkspaceTabId(input.target);
+  const parentTabIdByTabId = transferReplacedTabParent({
+    parentTabIdByTabId: input.layout.parentTabIdByTabId,
+    replacedTabId: input.tabId,
+    replacementTabId: nextTabId,
+  });
 
   return {
     // Preserve draft-origin tab ids so draft->entity transitions keep the same
@@ -1674,7 +1685,7 @@ export function retargetTabInLayout(
         target: input.target,
       }),
       focusedPaneId: layout.focusedPaneId,
-      parentTabIdByTabId: input.layout.parentTabIdByTabId,
+      parentTabIdByTabId,
     }),
   };
 }
@@ -2420,12 +2431,13 @@ export function reconcileWorkspaceTabs(
   const activeAgentIds = normalizeStringSet(snapshot.activeAgentIds);
   const autoOpenAgentIds = normalizeStringSet(snapshot.autoOpenAgentIds);
   const knownAgentIds = normalizeStringSet(snapshot.knownAgentIds);
+  const continuityAgentIds = continuityAgentIdsFor(snapshot);
   const standaloneTerminalIds = normalizeStringSet(snapshot.standaloneTerminalIds);
   const knownTerminalIds = snapshot.knownTerminalIds
     ? normalizeStringSet(snapshot.knownTerminalIds)
     : standaloneTerminalIds;
   const visibleAgentIds = applyPinnedAndHidden({
-    baseAgentIds: activeAgentIds,
+    baseAgentIds: new Set([...activeAgentIds, ...continuityAgentIds]),
     pinnedAgentIds,
     pendingAgentIds,
     hiddenAgentIds,
