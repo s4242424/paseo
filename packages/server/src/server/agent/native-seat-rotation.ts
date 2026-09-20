@@ -26,6 +26,10 @@ const JournalSchema = z.object({
   version: z.literal(1),
   operationId: z.string().uuid(),
   predecessorId: z.string().uuid(),
+  // A lazy provider may not allocate the successor's native session until its
+  // first turn. Keep the predecessor identity so terminal resume validation can
+  // still prove that a newly allocated successor did not reuse it.
+  predecessorSessionId: z.string().min(1).optional(),
   generation: z.number().int().positive(),
   fingerprint: z.string().regex(/^[a-f0-9]{64}$/),
   checkpointPath: z.string(),
@@ -188,6 +192,7 @@ export class NativeSeatRotationService {
       version: 1,
       operationId: request.operationId,
       predecessorId: request.predecessorId,
+      predecessorSessionId: checkpoint.checkpoint.sessionId,
       generation: request.generation,
       fingerprint,
       checkpointPath: checkpoint.checkpointPath,
@@ -415,6 +420,22 @@ export class NativeSeatRotationService {
         const latest = await this.requireJournal(journal.operationId);
         if (await this.isCancelledFor(journal.operationId, journal.predecessorId)) return;
         if (completed) {
+          const successor = latest.successorId
+            ? this.options.agentManager.getAgent(latest.successorId)
+            : null;
+          const successorSessionId = successor?.persistence?.sessionId;
+          if (
+            !successorSessionId ||
+            (latest.predecessorSessionId !== undefined &&
+              successorSessionId === latest.predecessorSessionId)
+          ) {
+            await this.write({
+              ...latest,
+              state: "resume_failed",
+              error: "successor resume did not establish a distinct provider session",
+            });
+            return;
+          }
           await this.write({ ...latest, state: "resumed", error: undefined });
           // The provider's final idle event is emitted before the receipt is
           // durable. Re-emit the normal successor state after the receipt so a
@@ -613,8 +634,8 @@ export class NativeSeatRotationService {
     if (
       successor.lifecycle === "closed" ||
       successor.id === predecessor.id ||
-      !successor.persistence?.sessionId ||
-      successor.persistence.sessionId === predecessor.persistence?.sessionId ||
+      (successor.persistence?.sessionId !== undefined &&
+        successor.persistence.sessionId === predecessor.persistence?.sessionId) ||
       successor.cwd !== checkpoint.repoPath ||
       successor.provider !== predecessor.provider ||
       JSON.stringify(successor.config) !== JSON.stringify(predecessor.config)
