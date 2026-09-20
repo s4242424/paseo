@@ -30,8 +30,10 @@ function createUpdates() {
 function createTimeout() {
   let onTimeout: (() => void) | null = null;
   let cancelCount = 0;
+  let scheduleCount = 0;
   return {
     schedule(callback: () => void) {
+      scheduleCount += 1;
       onTimeout = callback;
       return () => {
         cancelCount += 1;
@@ -43,6 +45,9 @@ function createTimeout() {
     },
     get cancelCount() {
       return cancelCount;
+    },
+    get scheduleCount() {
+      return scheduleCount;
     },
   };
 }
@@ -76,7 +81,7 @@ describe("waitForSeatRotationReceipt", () => {
 
     expect(inspectCount).toBe(1);
     expect(unsubscribeCount).toBe(1);
-    expect(timeout.cancelCount).toBe(0);
+    expect(timeout.cancelCount).toBe(1);
   });
 
   test("reinspects once when an update arrives during the first inspect", async () => {
@@ -202,5 +207,82 @@ describe("waitForSeatRotationReceipt", () => {
     updates.emit();
     expect(inspectCount).toBe(1);
     expect(updates.unsubscribeCount).toBe(1);
+  });
+
+  test("keeps one absolute deadline through continuous notifications", async () => {
+    const updates = createUpdates();
+    const timeout = createTimeout();
+    const inspectors: Array<(receipt: Receipt) => void> = [];
+    let resolveNextInspection: (() => void) | null = null;
+    const nextInspection = () =>
+      new Promise<void>((resolve) => {
+        resolveNextInspection = resolve;
+      });
+    const inspect = async (): Promise<Receipt> =>
+      await new Promise<Receipt>((resolve) => {
+        inspectors.push(resolve);
+        resolveNextInspection?.();
+        resolveNextInspection = null;
+      });
+    const waiting = waitForSeatRotationReceipt({
+      timeoutMs: 20,
+      inspect,
+      subscribe: updates.subscribe,
+      scheduleTimeout: timeout.schedule,
+    });
+
+    expect(inspectors).toHaveLength(1);
+    updates.emit();
+    const secondInspection = nextInspection();
+    inspectors.shift()?.({ phase: "pending", revision: 1 });
+    await secondInspection;
+    expect(inspectors).toHaveLength(1);
+    updates.emit();
+    updates.emit();
+    const thirdInspection = nextInspection();
+    inspectors.shift()?.({ phase: "pending", revision: 2 });
+    await thirdInspection;
+    expect(inspectors).toHaveLength(1);
+    expect(timeout.scheduleCount).toBe(1);
+
+    timeout.fire();
+    await expect(waiting).rejects.toThrow("Timed out waiting for terminal seat rotation receipt");
+    expect(updates.unsubscribeCount).toBe(1);
+    expect(timeout.cancelCount).toBe(1);
+  });
+
+  test("times out and unsubscribes when inspection never resolves", async () => {
+    const updates = createUpdates();
+    const timeout = createTimeout();
+    const waiting = waitForSeatRotationReceipt({
+      timeoutMs: 20,
+      inspect: async () => await new Promise<never>(() => {}),
+      subscribe: updates.subscribe,
+      scheduleTimeout: timeout.schedule,
+    });
+
+    timeout.fire();
+    await expect(waiting).rejects.toThrow("Timed out waiting for terminal seat rotation receipt");
+    expect(timeout.scheduleCount).toBe(1);
+    expect(timeout.cancelCount).toBe(1);
+    expect(updates.unsubscribeCount).toBe(1);
+  });
+
+  test("disposes the deadline when subscription fails", async () => {
+    const timeout = createTimeout();
+
+    await expect(
+      waitForSeatRotationReceipt({
+        timeoutMs: 20,
+        inspect: async () => ({ phase: "pending", revision: 1 }),
+        subscribe: () => {
+          throw new Error("subscription unavailable");
+        },
+        scheduleTimeout: timeout.schedule,
+      }),
+    ).rejects.toThrow("subscription unavailable");
+
+    expect(timeout.scheduleCount).toBe(1);
+    expect(timeout.cancelCount).toBe(1);
   });
 });
