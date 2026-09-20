@@ -87,6 +87,8 @@ export function useWorkspaceSeatRotationContinuity(input: {
   inspectionsRef.current = inspections;
   const predecessorsRef = useRef(predecessors);
   predecessorsRef.current = predecessors;
+  const previousAgentStateKey = useRef<string | null>(null);
+  const pendingAgentStateKey = useRef<string | null>(null);
   const inspectedAgentStateKey = useRef<string | null>(null);
 
   useEffect(() => {
@@ -109,16 +111,20 @@ export function useWorkspaceSeatRotationContinuity(input: {
 
   useEffect(() => {
     if (!enabled || !input.client || !agentStateKey) return;
-    if (inspectedAgentStateKey.current === agentStateKey) return;
-    inspectedAgentStateKey.current = agentStateKey;
+    const stateChanged =
+      previousAgentStateKey.current !== null && previousAgentStateKey.current !== agentStateKey;
+    previousAgentStateKey.current = agentStateKey;
     for (const [index, inspection] of inspectionsRef.current.entries()) {
       const predecessor = predecessorsRef.current[index];
       if (!predecessor) continue;
       const accepted = acceptedInspectionsRef.current.get(predecessor.id);
       if (!accepted?.operationId) {
+        if (stateChanged) pendingAgentStateKey.current = agentStateKey;
         void inspection.refetch();
         continue;
       }
+      const shouldReadback = stateChanged || pendingAgentStateKey.current === agentStateKey;
+      if (!shouldReadback || inspectedAgentStateKey.current === agentStateKey) continue;
       void input.client
         .inspectAgentSeatRotation(accepted.operationId)
         .then((receipt) => {
@@ -135,8 +141,10 @@ export function useWorkspaceSeatRotationContinuity(input: {
           return undefined;
         })
         .catch(() => undefined);
+      inspectedAgentStateKey.current = agentStateKey;
+      pendingAgentStateKey.current = null;
     }
-  }, [agentStateKey, enabled, input.client, predecessorKey]);
+  }, [acceptedInspections, agentStateKey, enabled, input.client, predecessorKey]);
 
   const appliedSuccesses = useRef(new Set<string>());
   useEffect(() => {

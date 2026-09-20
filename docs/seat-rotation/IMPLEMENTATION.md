@@ -68,6 +68,13 @@ a regular, non-symlink file below that root. Preserve the repository's canonical
 checkpoint owner and update protocol; configuration does not authorise a caller
 to overwrite that file blindly.
 
+Supported scope is a Git-backed workspace. Native validation runs `git -C
+<repository> rev-parse HEAD` and a porcelain status check before the archive,
+then checks the recorded source revision and clean disposition again after it.
+A non-Git conversation root, including Escape's conversation root, is
+unsupported. Do not initialise Git, change the root, or create a covert
+repository merely to make it eligible.
+
 ## Checkpoint, boundary, and policy
 
 The preparation turn writes a JSON envelope containing `operationId`,
