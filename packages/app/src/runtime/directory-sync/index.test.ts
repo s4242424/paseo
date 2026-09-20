@@ -209,6 +209,7 @@ describe("DirectorySync session readiness", () => {
           agents: new Map(),
           workspaces: new Map(),
           projects: new Map(),
+          checkpoint: { workspaces: { generation: "stale-directory", afterSeq: 9 } },
         }),
         commitDirectoryMutations: () => undefined,
       },
@@ -229,6 +230,7 @@ describe("DirectorySync session readiness", () => {
 
     const prepare = directory.prepareWorkspaceRoute("historical-workspace");
     await expect.poll(() => client.fetchWorkspacesCalls).toBe(1);
+    expect(client.lastWorkspaceOptions).not.toHaveProperty("sync");
     completeFetch({
       requestId: "workspaces",
       entries: [

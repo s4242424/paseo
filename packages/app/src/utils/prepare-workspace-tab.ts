@@ -7,6 +7,7 @@ export interface PrepareWorkspaceTabInput {
   workspaceId: string;
   target: WorkspaceTabTarget;
   pin?: boolean;
+  preserveSeatRotation?: boolean;
   placement?: WorkspaceTabPlacement;
 }
 
@@ -16,6 +17,7 @@ export interface PrepareWorkspaceTabDeps {
     target: WorkspaceTabTarget;
     intent: "reveal";
     pin?: boolean;
+    preserveSeatRotation?: boolean;
     placement?: WorkspaceTabPlacement;
   }) => string | null;
 }
@@ -43,6 +45,7 @@ export function prepareWorkspaceTab(
     target,
     intent: "reveal",
     pin: input.pin === true && target.kind === "agent",
+    preserveSeatRotation: input.preserveSeatRotation === true && target.kind === "agent",
     placement: input.placement,
   });
 }

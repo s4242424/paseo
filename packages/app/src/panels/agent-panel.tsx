@@ -384,14 +384,22 @@ function useAgentPanelDescriptor(
 }
 
 function AgentPanel() {
-  const { serverId, workspaceId, target, openFileInWorkspace, retargetCurrentTab } =
-    usePaneContext();
+  const { serverId, workspaceId, target, openFileInWorkspace } = usePaneContext();
   const { isInteractive } = usePaneFocus();
   invariant(target.kind === "agent", "AgentPanel requires agent target");
   const client = useHostRuntimeClient(serverId);
   const isConnected = useHostRuntimeIsConnected(serverId);
   const supportsSeatRotation = useHostFeature(serverId, "nativeSeatRotation");
   const supportsSeatRotationPolicy = useHostFeature(serverId, "seatRotationPolicyStatus");
+  const retargetSeatRotationAgentTab = useWorkspaceLayoutStore((state) => state.retargetAgentTab);
+  const retargetCurrentSeat = useCallback(
+    (successor: { kind: "agent"; agentId: string }, operationId: string) => {
+      const workspaceKey = buildWorkspaceTabPersistenceKey({ serverId, workspaceId });
+      if (!workspaceKey) return;
+      retargetSeatRotationAgentTab(workspaceKey, target.agentId, successor.agentId, operationId);
+    },
+    [retargetSeatRotationAgentTab, serverId, target.agentId, workspaceId],
+  );
   const seatRotation = useSeatRotationContinuity({
     serverId,
     workspaceId,
@@ -400,7 +408,7 @@ function AgentPanel() {
     isConnected,
     supported: supportsSeatRotation,
     policySupported: supportsSeatRotationPolicy,
-    retargetCurrentTab,
+    retargetCurrentTab: retargetCurrentSeat,
   });
 
   return (

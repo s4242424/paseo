@@ -69,17 +69,20 @@ function stripOpenSearchParamFromBrowserUrl() {
     return;
   }
   const url = new URL(window.location.href);
-  if (!url.searchParams.has("open")) {
+  if (!url.searchParams.has("open") && !url.searchParams.has("history")) {
     return;
   }
   url.searchParams.delete("open");
+  url.searchParams.delete("history");
   replaceBrowserRouteWithCanonicalHostWorkspaceRoute(`${url.pathname}${url.search}${url.hash}`);
 }
 
 function clearConsumedOpenIntent(input: {
-  navigation: { setParams: (params: { open?: string | undefined }) => void };
+  navigation: {
+    setParams: (params: { open?: string | undefined; history?: string | undefined }) => void;
+  };
 }) {
-  input.navigation.setParams({ open: undefined });
+  input.navigation.setParams({ open: undefined, history: undefined });
   if (isWeb) {
     stripOpenSearchParamFromBrowserUrl();
   }
@@ -105,6 +108,7 @@ function HostWorkspaceRouteContent() {
   }>();
   const globalParams = useGlobalSearchParams<{
     open?: string | string[];
+    history?: string | string[];
   }>();
   const serverId = getParamValue(params.serverId);
   const workspaceValue = getParamValue(params.workspaceId);
@@ -112,6 +116,7 @@ function HostWorkspaceRouteContent() {
     ? (decodeWorkspaceIdFromPathSegment(workspaceValue) ?? "")
     : "";
   const openValue = getParamValue(globalParams.open);
+  const isHistoricalOpen = getParamValue(globalParams.history) === "1";
   const hasHydratedWorkspaces = useHasHydratedWorkspaces(serverId);
   const workspaceExists = useWorkspaceExists(serverId, workspaceId);
   const openIntent = useMemo(() => parseWorkspaceOpenIntent(openValue), [openValue]);
@@ -141,11 +146,11 @@ function HostWorkspaceRouteContent() {
       return;
     }
 
-    const consumptionKey = `${serverId}:${workspaceId}:${openValue}`;
+    const consumptionKey = `${serverId}:${workspaceId}:${openValue}:${isHistoricalOpen}`;
     if (consumedIntentRef.current === consumptionKey) {
       clearConsumedOpenIntent({
         navigation: navigation as unknown as {
-          setParams: (params: { open?: string | undefined }) => void;
+          setParams: (params: { open?: string | undefined; history?: string | undefined }) => void;
         },
       });
       setIntentConsumed(true);
@@ -159,6 +164,7 @@ function HostWorkspaceRouteContent() {
         workspaceId,
         target: getOpenIntentTarget(openIntent),
         pin: openIntent.kind === "agent",
+        preserveSeatRotation: openIntent.kind === "agent" && isHistoricalOpen,
       });
     }
 
@@ -167,7 +173,7 @@ function HostWorkspaceRouteContent() {
     // address bar reflects the clean workspace route.
     clearConsumedOpenIntent({
       navigation: navigation as unknown as {
-        setParams: (params: { open?: string | undefined }) => void;
+        setParams: (params: { open?: string | undefined; history?: string | undefined }) => void;
       },
     });
 
@@ -178,6 +184,7 @@ function HostWorkspaceRouteContent() {
     navigation,
     openIntent,
     openValue,
+    isHistoricalOpen,
     rootNavigationState?.key,
     serverId,
     workspaceId,

@@ -13,6 +13,7 @@ import {
   type ReactNode,
 } from "react";
 import { useStoreWithEqualityFn } from "zustand/traditional";
+import { useShallow } from "zustand/shallow";
 import { useIsFocused } from "@react-navigation/native";
 import { BackHandler, Keyboard, Pressable, Text, View } from "react-native";
 import { useQueryClient } from "@tanstack/react-query";
@@ -1874,6 +1875,17 @@ function WorkspaceScreenContent({
     supported: supportsSeatRotation,
     retargetAgentTab: handleSeatRotationAgentRetarget,
   });
+  const historicalSeatRotationAgentIds = useWorkspaceLayoutStore(
+    useShallow((state) =>
+      persistenceKey
+        ? Object.keys(state.historicalSeatRotationAgentIdsByWorkspace[persistenceKey] ?? {})
+        : [],
+    ),
+  );
+  const retainedContinuityAgentIds = useMemo(
+    () => new Set([...continuityAgentIds, ...historicalSeatRotationAgentIds]),
+    [continuityAgentIds, historicalSeatRotationAgentIds],
+  );
   useOpenAgentTabLabels({
     client,
     serverId: normalizedServerId,
@@ -2086,7 +2098,7 @@ function WorkspaceScreenContent({
         terminalsHydrated: terminalsQuery.isSuccess,
         knownTerminalIds,
         standaloneTerminalIds,
-        continuityAgentIds,
+        continuityAgentIds: retainedContinuityAgentIds,
         hasActivePendingTerminalCreate:
           createTerminalMutation.isPending || pendingTerminalCreateInput !== null,
         hasActivePendingDraftCreate: hasActivePendingDraftCreateInWorkspace,
@@ -2097,7 +2109,7 @@ function WorkspaceScreenContent({
     hasHydratedWorkspaceLayoutStore,
     pendingTerminalCreateInput,
     createTerminalMutation.isPending,
-    continuityAgentIds,
+    retainedContinuityAgentIds,
     isRouteFocused,
     normalizedServerId,
     normalizedWorkspaceId,

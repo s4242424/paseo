@@ -98,6 +98,8 @@ export interface OpenWorkspaceTabInput {
   intent: WorkspaceTabOpenIntent;
   /** Keeps an explicitly opened agent visible even when it is archived. */
   pin?: boolean;
+  /** An ordinary History action must not become a new logical seat. */
+  preserveSeatRotation?: boolean;
   placement?: WorkspaceTabPlacement;
   parentTabId?: string;
   state?: JsonValue;
@@ -112,6 +114,8 @@ interface WorkspaceLayoutStore {
   hiddenAgentIdsByWorkspace: Record<string, Set<string>>;
   /** Durable operation keys whose visible logical seats have already moved. */
   completedSeatRotationKeysByWorkspace: Record<string, Record<string, true>>;
+  /** Agent tabs explicitly opened from History, outside logical-seat replacement. */
+  historicalSeatRotationAgentIdsByWorkspace: Record<string, Record<string, true>>;
   focusRestorationByWorkspace: Record<string, WorkspaceFocusRestorationState>;
   explorerSidebarPaneIdByWorkspace: Record<string, string | null>;
   sidePaneIdByWorkspace: Record<string, string | null>;
@@ -296,6 +300,9 @@ const WorkspaceLayoutPersistedStateSchema = z.strictObject({
   // and ignored so upgrading does not discard the layout. Remove after 2027-08-20.
   acknowledgedPullRequestByWorkspace: z.record(z.string(), z.string()).optional(),
   completedSeatRotationKeysByWorkspace: z
+    .record(z.string(), z.record(z.string(), z.literal(true)))
+    .optional(),
+  historicalSeatRotationAgentIdsByWorkspace: z
     .record(z.string(), z.record(z.string(), z.literal(true)))
     .optional(),
 });
@@ -780,6 +787,7 @@ export function createWorkspaceLayoutStore(
         pendingAgentIdsByWorkspace: {},
         hiddenAgentIdsByWorkspace: {},
         completedSeatRotationKeysByWorkspace: {},
+        historicalSeatRotationAgentIdsByWorkspace: {},
         focusRestorationByWorkspace: {},
         explorerSidebarPaneIdByWorkspace: {},
         sidePaneIdByWorkspace: {},
@@ -827,6 +835,8 @@ export function createWorkspaceLayoutStore(
             placement.layout.focusedPaneId,
           );
           const shouldPinAgent = input.pin === true && normalizedTarget.kind === "agent";
+          const shouldPreserveSeatRotation =
+            input.preserveSeatRotation === true && normalizedTarget.kind === "agent";
           set((state) => ({
             ...withoutFocusRestoration(state, normalizedWorkspaceKey),
             hiddenAgentIdsByWorkspace:
@@ -851,6 +861,15 @@ export function createWorkspaceLayoutStore(
                   normalizedTarget.agentId,
                 )
               : state.pendingAgentIdsByWorkspace,
+            historicalSeatRotationAgentIdsByWorkspace: shouldPreserveSeatRotation
+              ? {
+                  ...state.historicalSeatRotationAgentIdsByWorkspace,
+                  [normalizedWorkspaceKey]: {
+                    ...state.historicalSeatRotationAgentIdsByWorkspace[normalizedWorkspaceKey],
+                    [normalizedTarget.agentId]: true,
+                  },
+                }
+              : state.historicalSeatRotationAgentIdsByWorkspace,
             layoutByWorkspace: {
               ...state.layoutByWorkspace,
               [normalizedWorkspaceKey]: input.parentTabId
@@ -1166,6 +1185,13 @@ export function createWorkspaceLayoutStore(
             return null;
           }
           const completionKey = `${normalizedOperationId}:${normalizedPredecessorId}:${normalizedSuccessorId}`;
+          if (
+            get().historicalSeatRotationAgentIdsByWorkspace[normalizedWorkspaceKey]?.[
+              normalizedPredecessorId
+            ]
+          ) {
+            return null;
+          }
           if (get().completedSeatRotationKeysByWorkspace[normalizedWorkspaceKey]?.[completionKey]) {
             return null;
           }
@@ -1848,6 +1874,7 @@ export function createWorkspaceLayoutStore(
               normalizedWorkspaceKey in state.pendingAgentIdsByWorkspace ||
               normalizedWorkspaceKey in state.hiddenAgentIdsByWorkspace ||
               normalizedWorkspaceKey in state.completedSeatRotationKeysByWorkspace ||
+              normalizedWorkspaceKey in state.historicalSeatRotationAgentIdsByWorkspace ||
               normalizedWorkspaceKey in state.focusRestorationByWorkspace ||
               normalizedWorkspaceKey in state.explorerSidebarPaneIdByWorkspace ||
               normalizedWorkspaceKey in state.sidePaneIdByWorkspace;
@@ -1872,6 +1899,10 @@ export function createWorkspaceLayoutStore(
               [normalizedWorkspaceKey]: _completedSeatRotation,
               ...completedSeatRotationKeysByWorkspace
             } = state.completedSeatRotationKeysByWorkspace;
+            const {
+              [normalizedWorkspaceKey]: _historicalSeatRotation,
+              ...historicalSeatRotationAgentIdsByWorkspace
+            } = state.historicalSeatRotationAgentIdsByWorkspace;
             const { [normalizedWorkspaceKey]: _restoration, ...focusRestorationByWorkspace } =
               state.focusRestorationByWorkspace;
             const {
@@ -1888,6 +1919,7 @@ export function createWorkspaceLayoutStore(
               pendingAgentIdsByWorkspace,
               hiddenAgentIdsByWorkspace,
               completedSeatRotationKeysByWorkspace,
+              historicalSeatRotationAgentIdsByWorkspace,
               focusRestorationByWorkspace,
               explorerSidebarPaneIdByWorkspace,
               sidePaneIdByWorkspace,
@@ -1917,6 +1949,8 @@ export function createWorkspaceLayoutStore(
             explorerPaneIdByWorkspace: state.explorerSidebarPaneIdByWorkspace,
             sidePaneIdByWorkspace: state.sidePaneIdByWorkspace,
             completedSeatRotationKeysByWorkspace: state.completedSeatRotationKeysByWorkspace,
+            historicalSeatRotationAgentIdsByWorkspace:
+              state.historicalSeatRotationAgentIdsByWorkspace,
           };
         },
         merge: (persistedState, currentState) => {
@@ -1963,6 +1997,8 @@ export function createWorkspaceLayoutStore(
             sidePaneIdByWorkspace: result.data.sidePaneIdByWorkspace ?? {},
             completedSeatRotationKeysByWorkspace:
               result.data.completedSeatRotationKeysByWorkspace ?? {},
+            historicalSeatRotationAgentIdsByWorkspace:
+              result.data.historicalSeatRotationAgentIdsByWorkspace ?? {},
           };
         },
       },

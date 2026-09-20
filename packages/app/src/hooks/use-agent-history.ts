@@ -112,6 +112,11 @@ export async function fetchAgentHistoryPage(input: {
     serverId: input.serverId,
     entries: payload.entries,
   });
+  useSessionStore.getState().setAgentDetails(input.serverId, (current) => {
+    const next = new Map(current);
+    for (const [agentId, agent] of agents) next.set(agentId, agent);
+    return next;
+  });
   const searchScoreByAgentKey: Record<string, number> = {};
   const searchMatchesByAgentKey: Record<string, AgentSearchMatch[]> = {};
   for (const entry of payload.entries) {

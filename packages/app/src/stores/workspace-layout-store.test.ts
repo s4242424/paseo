@@ -463,6 +463,7 @@ describe("workspace-layout-store version 2 migration", () => {
         "completedSeatRotationKeysByWorkspace",
         "explorerPaneIdByWorkspace",
         "explorerSidebarWidthByWorkspace",
+        "historicalSeatRotationAgentIdsByWorkspace",
         "layoutByWorkspace",
         "sidePaneIdByWorkspace",
         "splitSizesByWorkspace",
@@ -1013,6 +1014,7 @@ describe("workspace-layout-store actions", () => {
       pinnedAgentIdsByWorkspace: {},
       hiddenAgentIdsByWorkspace: {},
       completedSeatRotationKeysByWorkspace: {},
+      historicalSeatRotationAgentIdsByWorkspace: {},
       focusRestorationByWorkspace: {},
       explorerSidebarPaneIdByWorkspace: {},
     });
@@ -2950,6 +2952,8 @@ describe("workspace-layout-store actions", () => {
       explorerPaneIdByWorkspace: {},
       sidePaneIdByWorkspace: currentState.sidePaneIdByWorkspace,
       completedSeatRotationKeysByWorkspace: currentState.completedSeatRotationKeysByWorkspace,
+      historicalSeatRotationAgentIdsByWorkspace:
+        currentState.historicalSeatRotationAgentIdsByWorkspace,
     });
     expect(layout && collectAllTabs(layout.root).map((tab) => tab.target)).toEqual([
       {
@@ -3174,6 +3178,7 @@ describe("workspace-layout-store actions", () => {
       explorerPaneIdByWorkspace: {},
       sidePaneIdByWorkspace: {},
       completedSeatRotationKeysByWorkspace: {},
+      historicalSeatRotationAgentIdsByWorkspace: {},
     });
   });
 
@@ -3635,6 +3640,7 @@ describe("workspace-layout-store actions", () => {
       target: { kind: "agent", agentId: "predecessor-agent" },
       intent: "reveal",
       pin: true,
+      preserveSeatRotation: true,
     });
     expect(
       store.retargetAgentTab(workspaceKey, "predecessor-agent", "successor-agent", "operation-1"),

@@ -32,7 +32,7 @@ export function useSeatRotationContinuity(input: {
   isConnected: boolean;
   supported: boolean;
   policySupported: boolean;
-  retargetCurrentTab: (target: { kind: "agent"; agentId: string }) => void;
+  retargetCurrentTab: (target: { kind: "agent"; agentId: string }, operationId: string) => void;
 }): SeatRotationContinuityController {
   const retargetCurrentTab = input.retargetCurrentTab;
   const enabled = input.supported && input.isConnected && input.client !== null;
@@ -177,7 +177,7 @@ export function useSeatRotationContinuity(input: {
     const successKey = `${state.operationId}:${state.successorId}`;
     if (appliedSuccessRef.current === successKey) return;
     appliedSuccessRef.current = successKey;
-    retargetCurrentTab({ kind: "agent", agentId: state.successorId });
+    retargetCurrentTab({ kind: "agent", agentId: state.successorId }, state.operationId);
   }, [retargetCurrentTab, state]);
 
   const cancelMutation = useMutation({

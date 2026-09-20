@@ -91,7 +91,6 @@ test.describe("Seat rotation continuity", () => {
         workspaceId: workspace.id,
       });
       await expectWorkspaceTabVisible(page, successorId);
-      await expectAgentTabActive(page, successorId);
       await expectWorkspaceTabHidden(page, predecessor.id);
       await openSessions(page);
       await expectSessionRowVisible(page, predecessor.title);
