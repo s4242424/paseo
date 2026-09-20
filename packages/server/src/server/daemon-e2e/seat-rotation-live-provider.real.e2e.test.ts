@@ -157,10 +157,21 @@ async function createTaskRepo(root: string, provider: Provider, nonce: string): 
     path.join(repo, ".handover", "CURRENT.json"),
     JSON.stringify({ completedStep: 0, value: 1, nextStep: 1, nonce }, null, 2) + "\n",
   );
+  // Codex may initialise project-local Serena metadata before the first turn.
+  // It is provider tooling, not task state, and must not make a committed
+  // checkpoint handover appear dirty.
+  await writeFile(path.join(repo, ".gitignore"), ".serena/\n");
   await command(repo, ["init", "--quiet"]);
   await command(repo, ["config", "user.email", "seat-rotation@example.invalid"]);
   await command(repo, ["config", "user.name", "Seat Rotation Qualification"]);
-  await command(repo, ["add", "AGENTS.md", "TASK.md", "progress.json", ".handover/CURRENT.json"]);
+  await command(repo, [
+    "add",
+    "AGENTS.md",
+    "TASK.md",
+    "progress.json",
+    ".handover/CURRENT.json",
+    ".gitignore",
+  ]);
   await command(repo, ["commit", "--quiet", "-m", "seed continuity task"]);
   return repo;
 }
