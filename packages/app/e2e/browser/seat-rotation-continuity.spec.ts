@@ -6,9 +6,12 @@ import { expect } from "@playwright/test";
 import { test } from "../support/fixtures";
 import {
   createMockIdleAgent,
+  expectSessionRowVisible,
   expectWorkspaceTabHidden,
   expectWorkspaceTabVisible,
+  openSessions,
   openWorkspaceWithAgents,
+  reloadWorkspace,
 } from "../support/helpers/archive-tab";
 import { expectAgentTabActive, getTabTestIds } from "../support/helpers/launcher";
 import { createTempGitRepo } from "../support/helpers/workspace";
@@ -66,6 +69,13 @@ test.describe("Seat rotation continuity", () => {
       const tabIds = await getTabTestIds(page);
       expect(tabIds.filter((id) => id === `workspace-tab-agent_${successorId}`)).toHaveLength(1);
       expect(tabIds.filter((id) => id === `workspace-tab-agent_${predecessor.id}`)).toHaveLength(0);
+
+      await reloadWorkspace(page, created.workspace.id);
+      await expectWorkspaceTabVisible(page, successorId);
+      await expectAgentTabActive(page, successorId);
+      await expectWorkspaceTabHidden(page, predecessor.id);
+      await openSessions(page);
+      await expectSessionRowVisible(page, predecessor.title);
 
       // Native finishes with another idle agent_state after it durably updates
       // the receipt. The app must read that event by its monotonic updatedAt,

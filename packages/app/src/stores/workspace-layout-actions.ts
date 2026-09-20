@@ -1666,6 +1666,11 @@ export function retargetTabInLayout(
     currentTab?.target.kind === "draft"
       ? input.tabId
       : buildDeterministicWorkspaceTabId(input.target);
+  const parentTabIdByTabId = transferReplacedTabParent({
+    parentTabIdByTabId: input.layout.parentTabIdByTabId,
+    replacedTabId: input.tabId,
+    replacementTabId: nextTabId,
+  });
 
   return {
     // Preserve draft-origin tab ids so draft->entity transitions keep the same
@@ -1680,7 +1685,7 @@ export function retargetTabInLayout(
         target: input.target,
       }),
       focusedPaneId: layout.focusedPaneId,
-      parentTabIdByTabId: input.layout.parentTabIdByTabId,
+      parentTabIdByTabId,
     }),
   };
 }

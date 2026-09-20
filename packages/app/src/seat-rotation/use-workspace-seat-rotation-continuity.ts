@@ -1,8 +1,9 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { useFetchQueries } from "@/data/query";
 import { useSessionStore } from "@/stores/session-store";
 import type { WorkspaceTab } from "@/workspace-tabs/model";
+import { retainNewestSeatRotationInspection, type SeatRotationInspection } from "./model";
 
 /**
  * Do not let ordinary archived-tab pruning win the race against a durable
@@ -16,7 +17,9 @@ export function useWorkspaceSeatRotationContinuity(input: {
   client: DaemonClient | null;
   isConnected: boolean;
   supported: boolean;
+  retargetAgentTab: (predecessorId: string, successorId: string) => void;
 }): ReadonlySet<string> {
+  const retargetAgentTab = input.retargetAgentTab;
   const predecessors = useMemo(
     () =>
       [
@@ -30,6 +33,21 @@ export function useWorkspaceSeatRotationContinuity(input: {
     [input.agentArchiveState, input.tabs],
   );
   const enabled = input.supported && input.isConnected && input.client !== null;
+  const [acceptedInspections, setAcceptedInspections] = useState<
+    ReadonlyMap<string, SeatRotationInspection>
+  >(new Map());
+  const acceptedInspectionsRef = useRef(acceptedInspections);
+  acceptedInspectionsRef.current = acceptedInspections;
+  const agentStateKey = useSessionStore((state) => {
+    const session = state.sessions[input.serverId];
+    return [...(session?.agents.values() ?? [])]
+      .map(
+        (agent) =>
+          `${agent.id}:${agent.status}:${agent.archivedAt?.toISOString() ?? ""}:${agent.updatedAt.toISOString()}`,
+      )
+      .sort()
+      .join("|");
+  });
   const knownSnapshotAgentIdsKey = useSessionStore((state) => {
     const session = state.sessions[input.serverId];
     return [...(session?.agents.keys() ?? []), ...(session?.agentDetails.keys() ?? [])]
@@ -59,13 +77,88 @@ export function useWorkspaceSeatRotationContinuity(input: {
     })),
   );
 
+  useEffect(() => {
+    setAcceptedInspections((current) => {
+      let next: Map<string, SeatRotationInspection> | null = null;
+      for (const [index, inspection] of inspections.entries()) {
+        const predecessor = predecessors[index];
+        if (!predecessor || !inspection.data) continue;
+        const retained = retainNewestSeatRotationInspection(
+          (next ?? current).get(predecessor.id),
+          inspection.data,
+        );
+        if (retained === (next ?? current).get(predecessor.id)) continue;
+        next ??= new Map(current);
+        next.set(predecessor.id, retained);
+      }
+      return next ?? current;
+    });
+  }, [inspections, predecessors]);
+
+  useEffect(() => {
+    if (!enabled || !input.client || !agentStateKey) return;
+    for (const [index, inspection] of inspections.entries()) {
+      const predecessor = predecessors[index];
+      if (!predecessor) continue;
+      const accepted = acceptedInspectionsRef.current.get(predecessor.id);
+      if (!accepted?.operationId) {
+        void inspection.refetch();
+        continue;
+      }
+      void input.client
+        .inspectAgentSeatRotation(accepted.operationId)
+        .then((receipt) => {
+          setAcceptedInspections((current) => {
+            const retained = retainNewestSeatRotationInspection(
+              current.get(predecessor.id),
+              receipt,
+            );
+            if (retained === current.get(predecessor.id)) return current;
+            const next = new Map(current);
+            next.set(predecessor.id, retained);
+            return next;
+          });
+          return undefined;
+        })
+        .catch(() => undefined);
+    }
+  }, [agentStateKey, enabled, input.client, inspections, predecessors]);
+
+  const appliedSuccesses = useRef(new Set<string>());
+  useEffect(() => {
+    if (!enabled) return;
+    for (const [index, inspection] of inspections.entries()) {
+      const predecessor = predecessors[index];
+      const receipt = acceptedInspections.get(predecessor.id) ?? inspection.data;
+      if (
+        !predecessor ||
+        receipt?.phase !== "succeeded" ||
+        !receipt.successorId ||
+        !knownSnapshotAgentIds.has(receipt.successorId)
+      ) {
+        continue;
+      }
+      const successKey = `${receipt.operationId ?? ""}:${predecessor.id}:${receipt.successorId}`;
+      if (appliedSuccesses.current.has(successKey)) continue;
+      appliedSuccesses.current.add(successKey);
+      retargetAgentTab(predecessor.id, receipt.successorId);
+    }
+  }, [
+    acceptedInspections,
+    enabled,
+    inspections,
+    knownSnapshotAgentIds,
+    predecessors,
+    retargetAgentTab,
+  ]);
+
   return useMemo(() => {
     if (!enabled) return new Set<string>();
     const protectedAgentIds = new Set<string>();
     for (const [index, inspection] of inspections.entries()) {
       const predecessor = predecessors[index];
       if (!predecessor) continue;
-      const receipt = inspection.data;
+      const receipt = acceptedInspections.get(predecessor.id) ?? inspection.data;
       const phase = receipt?.phase;
       const needsSuccessorSnapshot =
         phase === "succeeded" &&
@@ -79,5 +172,5 @@ export function useWorkspaceSeatRotationContinuity(input: {
       }
     }
     return protectedAgentIds;
-  }, [enabled, inspections, knownSnapshotAgentIds, predecessors]);
+  }, [acceptedInspections, enabled, inspections, knownSnapshotAgentIds, predecessors]);
 }

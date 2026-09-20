@@ -40,6 +40,7 @@ import {
   reconcileWorkspaceTabs,
   removePaneFromTree,
   removeTabFromTree,
+  retargetTabInLayout,
   reorderFocusedPaneTabsInLayout,
   reorderPaneTabsInLayout,
   setPaneHiddenInLayout,
@@ -126,6 +127,12 @@ interface WorkspaceLayoutStore {
     tabId: string,
     target: WorkspaceTabTarget,
     state?: JsonValue,
+  ) => string | null;
+  /** Replaces durable seat successors without retaining a predecessor pin. */
+  retargetAgentTab: (
+    workspaceKey: string,
+    predecessorId: string,
+    successorId: string,
   ) => string | null;
   setTabState: (workspaceKey: string, tabId: string, state: JsonValue | undefined) => void;
   convertDraftToAgent: (workspaceKey: string, tabId: string, agentId: string) => string | null;
@@ -1137,6 +1144,64 @@ export function createWorkspaceLayoutStore(
             },
           }));
           return result.tabId;
+        },
+        retargetAgentTab: (workspaceKey, predecessorId, successorId) => {
+          const normalizedWorkspaceKey = trimNonEmpty(workspaceKey);
+          const normalizedPredecessorId = trimNonEmpty(predecessorId);
+          const normalizedSuccessorId = trimNonEmpty(successorId);
+          if (!normalizedWorkspaceKey || !normalizedPredecessorId || !normalizedSuccessorId) {
+            return null;
+          }
+          let retargetedTabId: string | null = null;
+          set((state) => {
+            let layout = getWorkspaceLayout(state.layoutByWorkspace, normalizedWorkspaceKey);
+            for (const tab of collectAllTabs(layout.root)) {
+              if (tab.target.kind !== "agent" || tab.target.agentId !== normalizedPredecessorId) {
+                continue;
+              }
+              const result = retargetTabInLayout({
+                layout,
+                tabId: tab.tabId,
+                target: { kind: "agent", agentId: normalizedSuccessorId },
+              });
+              if (!result) continue;
+              layout = result.layout;
+              retargetedTabId = result.tabId;
+            }
+            if (!retargetedTabId) return state;
+            const pinnedAgentIds = state.pinnedAgentIdsByWorkspace[normalizedWorkspaceKey] ?? null;
+            const transferPin = pinnedAgentIds?.has(normalizedPredecessorId) ?? false;
+            const withoutPredecessorPin = removeAgentIdFromWorkspaceSet(
+              state.pinnedAgentIdsByWorkspace,
+              normalizedWorkspaceKey,
+              normalizedPredecessorId,
+            );
+            return {
+              ...withoutFocusRestoration(state, normalizedWorkspaceKey),
+              hiddenAgentIdsByWorkspace: removeAgentIdFromWorkspaceSet(
+                state.hiddenAgentIdsByWorkspace,
+                normalizedWorkspaceKey,
+                normalizedSuccessorId,
+              ),
+              pinnedAgentIdsByWorkspace: transferPin
+                ? addAgentIdToWorkspaceSet(
+                    withoutPredecessorPin,
+                    normalizedWorkspaceKey,
+                    normalizedSuccessorId,
+                  )
+                : withoutPredecessorPin,
+              pendingAgentIdsByWorkspace: removeAgentIdFromWorkspaceSet(
+                state.pendingAgentIdsByWorkspace,
+                normalizedWorkspaceKey,
+                normalizedPredecessorId,
+              ),
+              layoutByWorkspace: {
+                ...state.layoutByWorkspace,
+                [normalizedWorkspaceKey]: layout,
+              },
+            };
+          });
+          return retargetedTabId;
         },
         setTabState: (workspaceKey, tabId, tabState) => {
           const normalizedWorkspaceKey = trimNonEmpty(workspaceKey);

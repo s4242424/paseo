@@ -3586,6 +3586,35 @@ describe("workspace-layout-store actions", () => {
     });
   });
 
+  it("retargets a pinned predecessor to one existing successor tab", () => {
+    const workspaceKey = createWorkspaceKey();
+    const store = workspaceLayoutStore.getState();
+    store.openTab({
+      workspaceKey,
+      target: { kind: "agent", agentId: "predecessor-agent" },
+      intent: "reveal",
+      pin: true,
+    });
+    store.openTab({
+      workspaceKey,
+      target: { kind: "agent", agentId: "successor-agent" },
+      intent: "background",
+    });
+
+    store.retargetAgentTab(workspaceKey, "predecessor-agent", "successor-agent");
+
+    const state = workspaceLayoutStore.getState();
+    expect(
+      state
+        .getWorkspaceTabs(workspaceKey)
+        .map((tab) => tab.target)
+        .filter((target) => target.kind === "agent"),
+    ).toEqual([{ kind: "agent", agentId: "successor-agent" }]);
+    expect(Array.from(state.pinnedAgentIdsByWorkspace[workspaceKey] ?? [])).toEqual([
+      "successor-agent",
+    ]);
+  });
+
   it("openTab reveal intent reopens hidden subagent tabs and clears hidden intent", () => {
     const workspaceKey = createWorkspaceKey();
     const store = workspaceLayoutStore.getState();

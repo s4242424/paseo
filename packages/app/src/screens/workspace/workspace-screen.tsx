@@ -1857,6 +1857,14 @@ function WorkspaceScreenContent({
     return archiveState;
   }, [sessionAgentDetails, sessionAgents, uiTabs]);
   const supportsSeatRotation = useHostFeature(normalizedServerId, "nativeSeatRotation");
+  const retargetSeatRotationAgentTab = useWorkspaceLayoutStore((state) => state.retargetAgentTab);
+  const handleSeatRotationAgentRetarget = useCallback(
+    (predecessorId: string, successorId: string) => {
+      if (!persistenceKey) return;
+      retargetSeatRotationAgentTab(persistenceKey, predecessorId, successorId);
+    },
+    [persistenceKey, retargetSeatRotationAgentTab],
+  );
   const continuityAgentIds = useWorkspaceSeatRotationContinuity({
     serverId: normalizedServerId,
     tabs: uiTabs,
@@ -1864,6 +1872,7 @@ function WorkspaceScreenContent({
     client,
     isConnected,
     supported: supportsSeatRotation,
+    retargetAgentTab: handleSeatRotationAgentRetarget,
   });
   useOpenAgentTabLabels({
     client,
