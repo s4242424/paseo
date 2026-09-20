@@ -20,6 +20,7 @@ async function fixture(options?: {
   holdTimeline?: boolean;
   emptyResume?: boolean;
   failStop?: boolean;
+  lazySuccessorSession?: boolean;
 }) {
   const root = await mkdtemp(path.join(os.tmpdir(), "native-seat-rotation-"));
   roots.push(root);
@@ -70,9 +71,11 @@ async function fixture(options?: {
     repoPath: realRepoPath,
     sessionId: "new-provider-session",
   });
+  if (options?.lazySuccessorSession) successor.persistence = null;
   const manager = {
     getAgent(id: string) {
-      return id === predecessorId ? predecessor : null;
+      if (id === predecessorId) return predecessor;
+      return id === successor.id ? successor : null;
     },
     beginNativeSeatRotationAdmission() {
       calls.push("admit");
@@ -87,9 +90,10 @@ async function fixture(options?: {
       calls.push("release");
     },
     notifyAgentState() {},
-    async createAgent() {
+    async createAgent(_config: never, agentId: string) {
       calls.push("create");
       if (options?.holdCreate) await waitForCreate;
+      successor.id = agentId!;
       return successor;
     },
     async archiveAgent() {
@@ -100,6 +104,9 @@ async function fixture(options?: {
       calls.push("resume");
       return (async function* () {
         if (options?.emptyResume) return;
+        if (options?.lazySuccessorSession) {
+          successor.persistence = { provider: "codex", sessionId: "new-provider-session" };
+        }
         yield { type: "turn_completed" };
       })();
     },
@@ -216,6 +223,13 @@ test("writes a receipt and fences the real manager surface before archive and re
   });
   await expect(f.service.rotate(request(f))).resolves.toMatchObject({ accepted: true });
   expect(f.calls.filter((call) => call === "create")).toHaveLength(1);
+});
+
+test("accepts a lazy successor session only after its first completed turn establishes a new identity", async () => {
+  const f = await fixture({ lazySuccessorSession: true });
+  await expect(f.service.rotate(request(f))).resolves.toMatchObject({ accepted: true });
+  await f.service.waitForOperation(operationId);
+  await expect(f.service.inspect(operationId)).resolves.toMatchObject({ phase: "succeeded" });
 });
 
 test("a Stop latched during successor preparation preserves the predecessor", async () => {
