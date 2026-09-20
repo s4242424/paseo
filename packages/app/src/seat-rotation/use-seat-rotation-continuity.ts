@@ -130,16 +130,19 @@ export function useSeatRotationContinuity(input: {
   }, [operationInspection.data]);
 
   useEffect(() => {
-    if (acceptedInspection?.phase !== "pending" || !acceptedInspection.operationId) return;
+    if (!enabled || !agentStateKey) return;
     if (inspectedAgentStateRef.current === agentStateKey) return;
     inspectedAgentStateRef.current = agentStateKey;
-    void operationInspection.refetch();
-  }, [
-    acceptedInspection?.operationId,
-    acceptedInspection?.phase,
-    agentStateKey,
-    operationInspection,
-  ]);
+    // A receipt can be admitted after this panel's initial predecessor lookup.
+    // On each real agent_state event, discover that receipt once; after it is
+    // known, use the operation readback so the final identical-idle state sees
+    // the durable successor revision without polling.
+    if (acceptedInspection?.operationId) {
+      void operationInspection.refetch();
+    } else {
+      void inspection.refetch();
+    }
+  }, [acceptedInspection?.operationId, agentStateKey, enabled, inspection, operationInspection]);
 
   useEffect(() => {
     if (!policyEnabled || !agentStateKey) return;

@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { useFetchQueries } from "@/data/query";
+import { useSessionStore } from "@/stores/session-store";
 import type { WorkspaceTab } from "@/workspace-tabs/model";
 
 /**
@@ -29,6 +30,16 @@ export function useWorkspaceSeatRotationContinuity(input: {
     [input.agentArchiveState, input.tabs],
   );
   const enabled = input.supported && input.isConnected && input.client !== null;
+  const knownSnapshotAgentIdsKey = useSessionStore((state) => {
+    const session = state.sessions[input.serverId];
+    return [...(session?.agents.keys() ?? []), ...(session?.agentDetails.keys() ?? [])]
+      .sort()
+      .join("|");
+  });
+  const knownSnapshotAgentIds = useMemo(
+    () => new Set(knownSnapshotAgentIdsKey ? knownSnapshotAgentIdsKey.split("|") : []),
+    [knownSnapshotAgentIdsKey],
+  );
   const inspections = useFetchQueries(
     predecessors.map((predecessor) => ({
       // An archive transition needs a fresh lookup even when the active-tab
@@ -54,13 +65,19 @@ export function useWorkspaceSeatRotationContinuity(input: {
     for (const [index, inspection] of inspections.entries()) {
       const predecessor = predecessors[index];
       if (!predecessor) continue;
+      const receipt = inspection.data;
+      const phase = receipt?.phase;
+      const needsSuccessorSnapshot =
+        phase === "succeeded" &&
+        (!receipt?.successorId || !knownSnapshotAgentIds.has(receipt.successorId));
       if (
-        inspection.data?.phase ||
+        phase === "pending" ||
+        needsSuccessorSnapshot ||
         (predecessor.archivedAt !== null && (inspection.isPending || inspection.data === undefined))
       ) {
         protectedAgentIds.add(predecessor.id);
       }
     }
     return protectedAgentIds;
-  }, [enabled, inspections, predecessors]);
+  }, [enabled, inspections, knownSnapshotAgentIds, predecessors]);
 }
