@@ -4,6 +4,7 @@ import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
 import { z } from "zod";
+import { PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
 import type { AgentManager, ManagedAgent } from "./agent-manager.js";
 import type { AgentStorage } from "./agent-storage.js";
 
@@ -99,6 +100,8 @@ export class NativeSeatRotationService {
   private readonly resumeTails = new Map<string, Promise<void>>();
   /** Covers the pre-journal window for a normal predecessor Stop in this daemon. */
   private readonly predecessorOperations = new Map<string, string>();
+  /** Serialises the pre-journal lane for one predecessor across operation IDs. */
+  private readonly predecessorTails = new Map<string, Promise<void>>();
   /**
    * Serialises admission and Stop for one durable operation. The cancellation
    * file remains the crash-safe latch; this tail prevents Stop from releasing
@@ -124,18 +127,28 @@ export class NativeSeatRotationService {
   }
 
   async rotate(request: NativeSeatRotationRequest): Promise<NativeSeatRotationResult> {
-    this.predecessorOperations.set(request.predecessorId, request.operationId);
-    try {
-      return await this.withOperationLock(
-        request.operationId,
-        async () => await this.rotateUnlocked(request),
-      );
-    } catch (error) {
-      if (!(await this.read(request.operationId))) {
-        this.predecessorOperations.delete(request.predecessorId);
+    return await this.withPredecessorLock(request.predecessorId, async () => {
+      // Keep the first pre-journal intent visible to normal Stop. A concurrent
+      // invalid request must not replace and then clear that owner before its
+      // durable receipt has been written.
+      if (!this.predecessorOperations.has(request.predecessorId)) {
+        this.predecessorOperations.set(request.predecessorId, request.operationId);
       }
-      throw error;
-    }
+      try {
+        return await this.withOperationLock(
+          request.operationId,
+          async () => await this.rotateUnlocked(request),
+        );
+      } catch (error) {
+        if (
+          !(await this.read(request.operationId)) &&
+          this.predecessorOperations.get(request.predecessorId) === request.operationId
+        ) {
+          this.predecessorOperations.delete(request.predecessorId);
+        }
+        throw error;
+      }
+    });
   }
 
   private async rotateUnlocked(
@@ -183,6 +196,7 @@ export class NativeSeatRotationService {
     }
 
     try {
+      await this.assertNoActiveManagedChildren(request.predecessorId);
       this.options.agentManager.beginNativeSeatRotationAdmission(request.predecessorId, {
         operationId: request.operationId,
         generation: request.generation,
@@ -208,6 +222,31 @@ export class NativeSeatRotationService {
         checkpoint,
         revalidatedCheckpoint,
       );
+
+      // Allocate and validate an idle successor while the predecessor is still
+      // usable. A provider/configuration failure here must not turn a failed
+      // handover preparation into an unexpected Stop for the current seat.
+      const successorId = randomUUID();
+      // Persist the successor identity before createSession. If the process dies
+      // after a provider acknowledgement, recovery can inspect this one ID and
+      // must not make another create call.
+      journal = await this.write({ ...journal, state: "prepared", successorId });
+      const successor = await this.options.agentManager.createAgent(
+        { ...predecessor.config },
+        successorId,
+        {
+          labels: { ...predecessor.labels },
+          initialTitle: predecessor.config.title,
+          workspaceId: predecessor.workspaceId,
+          owner: predecessor.owner,
+        },
+      );
+      this.assertPreparedSuccessor({ predecessor, successor, checkpoint });
+
+      if (await this.isCancelledFor(request.operationId, request.predecessorId)) {
+        return await this.stopBeforeArchive(journal);
+      }
+
       const beforeArchive = this.options.agentManager.getAgent(request.predecessorId);
       if (!beforeArchive || beforeArchive.lifecycle === "closed") {
         throw new Error("rotation predecessor changed before archive");
@@ -234,27 +273,6 @@ export class NativeSeatRotationService {
         return await this.stopAfterFence(journal);
       }
 
-      const successorId = randomUUID();
-      // Persist the successor identity before createSession. If the process dies
-      // after a provider acknowledgement, recovery can inspect this one ID and
-      // must not make another create call.
-      journal = await this.write({ ...journal, state: "prepared", successorId });
-      const successor = await this.options.agentManager.createAgent(
-        { ...predecessor.config },
-        successorId,
-        {
-          labels: { ...predecessor.labels },
-          initialTitle: predecessor.config.title,
-          workspaceId: predecessor.workspaceId,
-          owner: predecessor.owner,
-        },
-      );
-      this.assertPreparedSuccessor({ predecessor, successor, checkpoint });
-
-      if (await this.isCancelledFor(request.operationId, request.predecessorId)) {
-        return await this.stopAfterFence(journal);
-      }
-
       // Persist uncertainty before the provider can accept the resume prompt.
       // A restart at this point must reconcile the recorded successor, never
       // create a replacement or repeat the prompt.
@@ -272,15 +290,7 @@ export class NativeSeatRotationService {
       return { accepted: true, operation: journal };
     } catch (error) {
       const latest = await this.read(request.operationId);
-      if (
-        latest &&
-        !["resume_uncertain", "cancelled", "cancelled_after_fence"].includes(latest.state)
-      ) {
-        if (["requested", "admitted", "prepared"].includes(latest.state)) {
-          await this.releaseFailedPreparation(latest);
-        }
-        await this.write({ ...latest, state: "blocked", error: errorMessage(error) });
-      }
+      await this.blockFailedRotation(latest, error);
       throw error;
     }
   }
@@ -521,6 +531,40 @@ export class NativeSeatRotationService {
     return { checkpoint, checkpointPath, checkpointHash, repoPath };
   }
 
+  private async assertNoActiveManagedChildren(predecessorId: string): Promise<void> {
+    const records = await this.options.agentStorage.list();
+    if (
+      records.some(
+        (record) => !record.archivedAt && record.labels?.[PARENT_AGENT_ID_LABEL] === predecessorId,
+      )
+    ) {
+      throw new Error("Agent has active managed children; native rotation is unsupported");
+    }
+  }
+
+  private async blockFailedRotation(
+    latest: NativeSeatRotationJournal | null,
+    error: unknown,
+  ): Promise<void> {
+    if (
+      !latest ||
+      ["resume_uncertain", "cancelled", "cancelled_after_fence"].includes(latest.state)
+    ) {
+      return;
+    }
+    if (["requested", "admitted", "prepared"].includes(latest.state)) {
+      await this.releaseFailedPreparation(latest);
+    }
+    if (latest.state === "archived" && latest.successorId) {
+      try {
+        await this.options.agentManager.closeAgent(latest.successorId);
+      } catch {
+        // The durable successor ID records the cleanup target for repair.
+      }
+    }
+    await this.write({ ...latest, state: "blocked", error: errorMessage(error) });
+  }
+
   /**
    * The predecessor no longer has a live manager record after archive. Keep the
    * identity checks made before archive, then prove that the same immutable
@@ -723,6 +767,25 @@ export class NativeSeatRotationService {
       release();
       if (this.operationTails.get(operationId) === queued) {
         this.operationTails.delete(operationId);
+      }
+    }
+  }
+
+  private async withPredecessorLock<T>(predecessorId: string, fn: () => Promise<T>): Promise<T> {
+    const previous = this.predecessorTails.get(predecessorId) ?? Promise.resolve();
+    let release!: () => void;
+    const tail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const queued = previous.catch(() => undefined).then(() => tail);
+    this.predecessorTails.set(predecessorId, queued);
+    await previous.catch(() => undefined);
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (this.predecessorTails.get(predecessorId) === queued) {
+        this.predecessorTails.delete(predecessorId);
       }
     }
   }

@@ -27,6 +27,13 @@ ID. Its snapshot links `operationId`, `phase`, `successorId`, `workspaceId`,
 `sourceRevision`, `revision`, and `failureCode`; it is not a replacement for
 the operation-ID receipt during an active transition.
 
+The daemon prepares and validates an idle successor before it archives the
+predecessor. Preparation failure leaves the predecessor live. After archive,
+the daemon rechecks the checkpoint and clean repository before it sends the
+resume prompt; a failed recheck closes the prepared successor without prompting
+it. Normal Stop latches the durable operation through the pre-journal window,
+so a queued different generation cannot hide that intent.
+
 ## Contract
 
 `SeatRotationCore` accepts an injected backend with these operations:
@@ -88,6 +95,7 @@ belongs in the daemon-owned receipt-backed rotate operation, not this script.
 | `npm run typecheck` via repository pre-commit                                                                                     |    2 | Existing Expo base declaration absence and unrelated plugin/CLI type incompatibilities; stdlib `.mjs` has no TypeScript compilation surface |
 | `semgrep --config auto scripts/seat-rotation`                                                                                     |    0 | 200 rules, 2 relevant JS targets, 0 findings                                                                                                |
 | `gitleaks detect --no-git --source scripts/seat-rotation --verbose`                                                               |    0 | 30,457 bytes scanned, 0 leaks                                                                                                               |
+| `npx vitest run packages/server/src/server/agent/native-seat-rotation.actual.e2e.test.ts --bail=1`                                |    0 | 10 in-process daemon cases: restart receipts, cancellation, admission races, default-off, permission and managed-child refusal              |
 
 `package-lock.json` was unchanged before implementation; final dependency
 evidence is recorded with the verification run.
