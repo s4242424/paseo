@@ -59,6 +59,13 @@ interface ProviderRunEvidence {
   initialSessionId: string | null;
   initialRuntime: unknown;
   initialProgress: unknown;
+  inFlightIdentities: Array<{
+    observedAt: string;
+    agentId: string;
+    status: string | null;
+    nativeSessionId: string | null;
+    runtime: unknown;
+  }>;
   rotations: RotationEvidence[];
   finalProgress?: unknown;
   archivedPredecessors: string[];
@@ -297,13 +304,34 @@ async function runProvider(input: {
   const workspaceId = workspace.workspace.id;
   const events: Array<{ at: string; agentId: string; status: string | null }> = [];
   const notifier = { signal: () => {} };
+  let evidence: ProviderRunEvidence | null = null;
   const unsubscribe = input.client.on("agent_update", (message) => {
     if (message.payload.kind !== "upsert") return;
+    const snapshot = message.payload.agent;
     events.push({
       at: new Date().toISOString(),
-      agentId: message.payload.agent.id,
-      status: message.payload.agent.status,
+      agentId: snapshot.id,
+      status: snapshot.status,
     });
+    if (evidence) {
+      const managed = input.daemon.daemon.agentManager.getAgent(snapshot.id);
+      const nativeSessionId =
+        managed?.persistence?.sessionId ?? snapshot.runtimeInfo?.sessionId ?? null;
+      const previous = evidence.inFlightIdentities.at(-1);
+      if (
+        nativeSessionId &&
+        (previous?.agentId !== snapshot.id || previous.nativeSessionId !== nativeSessionId)
+      ) {
+        evidence.inFlightIdentities.push({
+          observedAt: new Date().toISOString(),
+          agentId: snapshot.id,
+          status: snapshot.status,
+          nativeSessionId,
+          runtime: snapshot.runtimeInfo ?? null,
+        });
+        void input.persist();
+      }
+    }
     notifier.signal();
   });
   const agent = await input.client.createAgent({
@@ -316,7 +344,7 @@ async function runProvider(input: {
     thinkingOptionId: input.expected.effort,
     ...(input.expected.provider === "codex" ? { featureValues: { fast_mode: false } } : {}),
   });
-  const evidence: ProviderRunEvidence = {
+  evidence = {
     provider: input.expected.provider,
     expected: input.expected,
     taskRepo: repo,
@@ -325,6 +353,7 @@ async function runProvider(input: {
     initialSessionId: null,
     initialRuntime: null,
     initialProgress: null,
+    inFlightIdentities: [],
     rotations: [],
     archivedPredecessors: [],
   };
@@ -453,11 +482,19 @@ describe("seat rotation live providers (real, isolated)", () => {
         providers: [],
         cleanup: "pending",
       };
-      const persist = async () =>
-        await writeFile(
-          path.join(outputDir, "report.json"),
-          `${JSON.stringify(report, null, 2)}\n`,
-        );
+      let persistTail = Promise.resolve();
+      const persist = async () => {
+        persistTail = persistTail
+          .catch(() => undefined)
+          .then(async () => {
+            await writeFile(
+              path.join(outputDir, "report.json"),
+              `${JSON.stringify(report, null, 2)}\n`,
+            );
+            return undefined;
+          });
+        await persistTail;
+      };
       const logger = pino({ level: "warn" });
       const daemon = await createTestPaseoDaemon({
         paseoHomeRoot: stateRoot,
