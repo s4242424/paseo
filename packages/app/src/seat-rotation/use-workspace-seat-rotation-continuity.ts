@@ -17,7 +17,7 @@ export function useWorkspaceSeatRotationContinuity(input: {
   client: DaemonClient | null;
   isConnected: boolean;
   supported: boolean;
-  retargetAgentTab: (predecessorId: string, successorId: string) => void;
+  retargetAgentTab: (predecessorId: string, successorId: string, operationId: string) => void;
 }): ReadonlySet<string> {
   const retargetAgentTab = input.retargetAgentTab;
   const predecessors = useMemo(
@@ -163,7 +163,7 @@ export function useWorkspaceSeatRotationContinuity(input: {
       const successKey = `${receipt.operationId ?? ""}:${predecessor.id}:${receipt.successorId}`;
       if (appliedSuccesses.current.has(successKey)) continue;
       appliedSuccesses.current.add(successKey);
-      retargetAgentTab(predecessor.id, receipt.successorId);
+      retargetAgentTab(predecessor.id, receipt.successorId, receipt.operationId);
     }
   }, [
     acceptedInspections,

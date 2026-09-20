@@ -110,6 +110,8 @@ interface WorkspaceLayoutStore {
   pinnedAgentIdsByWorkspace: Record<string, Set<string>>;
   pendingAgentIdsByWorkspace: Record<string, Set<string>>;
   hiddenAgentIdsByWorkspace: Record<string, Set<string>>;
+  /** Durable operation keys whose visible logical seats have already moved. */
+  completedSeatRotationKeysByWorkspace: Record<string, Record<string, true>>;
   focusRestorationByWorkspace: Record<string, WorkspaceFocusRestorationState>;
   explorerSidebarPaneIdByWorkspace: Record<string, string | null>;
   sidePaneIdByWorkspace: Record<string, string | null>;
@@ -133,6 +135,7 @@ interface WorkspaceLayoutStore {
     workspaceKey: string,
     predecessorId: string,
     successorId: string,
+    operationId: string,
   ) => string | null;
   setTabState: (workspaceKey: string, tabId: string, state: JsonValue | undefined) => void;
   convertDraftToAgent: (workspaceKey: string, tabId: string, agentId: string) => string | null;
@@ -292,6 +295,9 @@ const WorkspaceLayoutPersistedStateSchema = z.strictObject({
   // COMPAT(pullRequestAutoAdd): PR detection stopped opening a tab in v0.5; accepted
   // and ignored so upgrading does not discard the layout. Remove after 2027-08-20.
   acknowledgedPullRequestByWorkspace: z.record(z.string(), z.string()).optional(),
+  completedSeatRotationKeysByWorkspace: z
+    .record(z.string(), z.record(z.string(), z.literal(true)))
+    .optional(),
 });
 
 const LEGACY_EXPLORER_SIDEBAR_REFERENCE_WIDTH = 1440;
@@ -773,6 +779,7 @@ export function createWorkspaceLayoutStore(
         pinnedAgentIdsByWorkspace: {},
         pendingAgentIdsByWorkspace: {},
         hiddenAgentIdsByWorkspace: {},
+        completedSeatRotationKeysByWorkspace: {},
         focusRestorationByWorkspace: {},
         explorerSidebarPaneIdByWorkspace: {},
         sidePaneIdByWorkspace: {},
@@ -1145,11 +1152,21 @@ export function createWorkspaceLayoutStore(
           }));
           return result.tabId;
         },
-        retargetAgentTab: (workspaceKey, predecessorId, successorId) => {
+        retargetAgentTab: (workspaceKey, predecessorId, successorId, operationId) => {
           const normalizedWorkspaceKey = trimNonEmpty(workspaceKey);
           const normalizedPredecessorId = trimNonEmpty(predecessorId);
           const normalizedSuccessorId = trimNonEmpty(successorId);
-          if (!normalizedWorkspaceKey || !normalizedPredecessorId || !normalizedSuccessorId) {
+          const normalizedOperationId = trimNonEmpty(operationId);
+          if (
+            !normalizedWorkspaceKey ||
+            !normalizedPredecessorId ||
+            !normalizedSuccessorId ||
+            !normalizedOperationId
+          ) {
+            return null;
+          }
+          const completionKey = `${normalizedOperationId}:${normalizedPredecessorId}:${normalizedSuccessorId}`;
+          if (get().completedSeatRotationKeysByWorkspace[normalizedWorkspaceKey]?.[completionKey]) {
             return null;
           }
           let retargetedTabId: string | null = null;
@@ -1195,6 +1212,13 @@ export function createWorkspaceLayoutStore(
                 normalizedWorkspaceKey,
                 normalizedPredecessorId,
               ),
+              completedSeatRotationKeysByWorkspace: {
+                ...state.completedSeatRotationKeysByWorkspace,
+                [normalizedWorkspaceKey]: {
+                  ...state.completedSeatRotationKeysByWorkspace[normalizedWorkspaceKey],
+                  [completionKey]: true,
+                },
+              },
               layoutByWorkspace: {
                 ...state.layoutByWorkspace,
                 [normalizedWorkspaceKey]: layout,
@@ -1823,6 +1847,7 @@ export function createWorkspaceLayoutStore(
               normalizedWorkspaceKey in state.pinnedAgentIdsByWorkspace ||
               normalizedWorkspaceKey in state.pendingAgentIdsByWorkspace ||
               normalizedWorkspaceKey in state.hiddenAgentIdsByWorkspace ||
+              normalizedWorkspaceKey in state.completedSeatRotationKeysByWorkspace ||
               normalizedWorkspaceKey in state.focusRestorationByWorkspace ||
               normalizedWorkspaceKey in state.explorerSidebarPaneIdByWorkspace ||
               normalizedWorkspaceKey in state.sidePaneIdByWorkspace;
@@ -1843,6 +1868,10 @@ export function createWorkspaceLayoutStore(
               state.pendingAgentIdsByWorkspace;
             const { [normalizedWorkspaceKey]: _hidden, ...hiddenAgentIdsByWorkspace } =
               state.hiddenAgentIdsByWorkspace;
+            const {
+              [normalizedWorkspaceKey]: _completedSeatRotation,
+              ...completedSeatRotationKeysByWorkspace
+            } = state.completedSeatRotationKeysByWorkspace;
             const { [normalizedWorkspaceKey]: _restoration, ...focusRestorationByWorkspace } =
               state.focusRestorationByWorkspace;
             const {
@@ -1858,6 +1887,7 @@ export function createWorkspaceLayoutStore(
               pinnedAgentIdsByWorkspace,
               pendingAgentIdsByWorkspace,
               hiddenAgentIdsByWorkspace,
+              completedSeatRotationKeysByWorkspace,
               focusRestorationByWorkspace,
               explorerSidebarPaneIdByWorkspace,
               sidePaneIdByWorkspace,
@@ -1886,6 +1916,7 @@ export function createWorkspaceLayoutStore(
             explorerSidebarWidthByWorkspace: state.explorerSidebarWidthByWorkspace,
             explorerPaneIdByWorkspace: state.explorerSidebarPaneIdByWorkspace,
             sidePaneIdByWorkspace: state.sidePaneIdByWorkspace,
+            completedSeatRotationKeysByWorkspace: state.completedSeatRotationKeysByWorkspace,
           };
         },
         merge: (persistedState, currentState) => {
@@ -1930,6 +1961,8 @@ export function createWorkspaceLayoutStore(
               ),
             explorerSidebarPaneIdByWorkspace,
             sidePaneIdByWorkspace: result.data.sidePaneIdByWorkspace ?? {},
+            completedSeatRotationKeysByWorkspace:
+              result.data.completedSeatRotationKeysByWorkspace ?? {},
           };
         },
       },

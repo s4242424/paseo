@@ -1859,9 +1859,9 @@ function WorkspaceScreenContent({
   const supportsSeatRotation = useHostFeature(normalizedServerId, "nativeSeatRotation");
   const retargetSeatRotationAgentTab = useWorkspaceLayoutStore((state) => state.retargetAgentTab);
   const handleSeatRotationAgentRetarget = useCallback(
-    (predecessorId: string, successorId: string) => {
+    (predecessorId: string, successorId: string, operationId: string) => {
       if (!persistenceKey) return;
-      retargetSeatRotationAgentTab(persistenceKey, predecessorId, successorId);
+      retargetSeatRotationAgentTab(persistenceKey, predecessorId, successorId, operationId);
     },
     [persistenceKey, retargetSeatRotationAgentTab],
   );

@@ -5,7 +5,9 @@ import path from "node:path";
 import { expect } from "@playwright/test";
 import { test } from "../support/fixtures";
 import {
+  clickSessionRow,
   createMockIdleAgent,
+  expectArchivedAgentFocused,
   expectSessionRowVisible,
   expectWorkspaceTabHidden,
   expectWorkspaceTabVisible,
@@ -22,6 +24,10 @@ interface RotationClient {
   fetchAgents(): Promise<{
     entries: Array<{ agent: { id: string; persistence: { sessionId: string } | null } }>;
   }>;
+  fetchAgentTimeline(
+    agentId: string,
+    options: { direction: "tail"; projection: "canonical"; limit: number },
+  ): Promise<{ window: { maxSeq: number } }>;
   rotateAgentSeat(input: {
     operationId: string;
     predecessorId: string;
@@ -56,14 +62,16 @@ test.describe("Seat rotation continuity", () => {
       workspaceId: created.workspace.id,
       title: "rotation-control",
     });
+    const historicalPrompt = "Keep this predecessor history readable.";
 
     try {
       await openWorkspaceWithAgents(page, [control, predecessor]);
       await expectAgentTabActive(page, predecessor.id);
+      await client.sendAgentMessage(predecessor.id, historicalPrompt);
+      await client.waitForFinish(predecessor.id, 30_000);
 
       const successorId = await rotateFromBrowserFixture(client, predecessor.id, repo.path);
       await expectWorkspaceTabVisible(page, successorId);
-      await expectAgentTabActive(page, successorId);
       await expectWorkspaceTabHidden(page, predecessor.id);
 
       const tabIds = await getTabTestIds(page);
@@ -76,6 +84,25 @@ test.describe("Seat rotation continuity", () => {
       await expectWorkspaceTabHidden(page, predecessor.id);
       await openSessions(page);
       await expectSessionRowVisible(page, predecessor.title);
+      await clickSessionRow(page, predecessor.title);
+      await expectWorkspaceTabVisible(page, predecessor.id);
+      await expectAgentTabActive(page, predecessor.id);
+      await expectArchivedAgentFocused(page, predecessor.id);
+      await expect(
+        page.getByTestId("user-message").filter({ hasText: historicalPrompt }),
+      ).toBeVisible();
+
+      // Opening an archived session from ordinary History is deliberate
+      // historical navigation, not a second logical seat. It survives a
+      // reconnect/reload beside the successor without being retargeted again.
+      await reloadWorkspace(page, created.workspace.id);
+      await expectWorkspaceTabVisible(page, successorId);
+      await expectWorkspaceTabVisible(page, predecessor.id);
+      await expectAgentTabActive(page, predecessor.id);
+      await expectArchivedAgentFocused(page, predecessor.id);
+      await expect(
+        page.getByTestId("user-message").filter({ hasText: historicalPrompt }),
+      ).toBeVisible();
 
       // Native finishes with another idle agent_state after it durably updates
       // the receipt. The app must read that event by its monotonic updatedAt,
@@ -134,6 +161,11 @@ async function rotateFromBrowserFixture(
   const sessionId = snapshot.entries.find((entry) => entry.agent.id === predecessorId)?.agent
     .persistence?.sessionId;
   if (!sessionId) throw new Error("Fixture predecessor has no durable session.");
+  const timeline = await client.fetchAgentTimeline(predecessorId, {
+    direction: "tail",
+    projection: "canonical",
+    limit: 1,
+  });
   const operationId = randomUUID();
   const handoverRoot = path.join(repoPath, ".handover");
   const checkpointPath = path.join(handoverRoot, `${operationId}.json`);
@@ -148,7 +180,7 @@ async function rotateFromBrowserFixture(
       sourceRevision: execFileSync("git", ["-C", repoPath, "rev-parse", "HEAD"], {
         encoding: "utf8",
       }).trim(),
-      timelineRevision: 0,
+      timelineRevision: timeline.window.maxSeq,
       dirtyDisposition: "clean",
       nextAction: "continue",
     })}\n`,

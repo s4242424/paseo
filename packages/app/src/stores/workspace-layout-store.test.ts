@@ -460,6 +460,7 @@ describe("workspace-layout-store version 2 migration", () => {
       const persisted = JSON.parse((await AsyncStorage.getItem("workspace-layout-state")) ?? "{}");
       expect(persisted.version).toBe(2);
       expect(Object.keys(persisted.state).sort()).toEqual([
+        "completedSeatRotationKeysByWorkspace",
         "explorerPaneIdByWorkspace",
         "explorerSidebarWidthByWorkspace",
         "layoutByWorkspace",
@@ -1011,6 +1012,7 @@ describe("workspace-layout-store actions", () => {
       splitSizesByWorkspace: {},
       pinnedAgentIdsByWorkspace: {},
       hiddenAgentIdsByWorkspace: {},
+      completedSeatRotationKeysByWorkspace: {},
       focusRestorationByWorkspace: {},
       explorerSidebarPaneIdByWorkspace: {},
     });
@@ -2947,6 +2949,7 @@ describe("workspace-layout-store actions", () => {
       explorerSidebarWidthByWorkspace: currentState.explorerSidebarWidthByWorkspace,
       explorerPaneIdByWorkspace: {},
       sidePaneIdByWorkspace: currentState.sidePaneIdByWorkspace,
+      completedSeatRotationKeysByWorkspace: currentState.completedSeatRotationKeysByWorkspace,
     });
     expect(layout && collectAllTabs(layout.root).map((tab) => tab.target)).toEqual([
       {
@@ -3170,6 +3173,7 @@ describe("workspace-layout-store actions", () => {
       explorerSidebarWidthByWorkspace: {},
       explorerPaneIdByWorkspace: {},
       sidePaneIdByWorkspace: {},
+      completedSeatRotationKeysByWorkspace: {},
     });
   });
 
@@ -3601,7 +3605,7 @@ describe("workspace-layout-store actions", () => {
       intent: "background",
     });
 
-    store.retargetAgentTab(workspaceKey, "predecessor-agent", "successor-agent");
+    store.retargetAgentTab(workspaceKey, "predecessor-agent", "successor-agent", "operation-1");
 
     const state = workspaceLayoutStore.getState();
     expect(
@@ -3612,6 +3616,38 @@ describe("workspace-layout-store actions", () => {
     ).toEqual([{ kind: "agent", agentId: "successor-agent" }]);
     expect(Array.from(state.pinnedAgentIdsByWorkspace[workspaceKey] ?? [])).toEqual([
       "successor-agent",
+    ]);
+  });
+
+  it("keeps an intentionally reopened predecessor after its logical seat has moved", () => {
+    const workspaceKey = createWorkspaceKey();
+    const store = workspaceLayoutStore.getState();
+    store.openTab({
+      workspaceKey,
+      target: { kind: "agent", agentId: "predecessor-agent" },
+      intent: "reveal",
+      pin: true,
+    });
+
+    store.retargetAgentTab(workspaceKey, "predecessor-agent", "successor-agent", "operation-1");
+    store.openTab({
+      workspaceKey,
+      target: { kind: "agent", agentId: "predecessor-agent" },
+      intent: "reveal",
+      pin: true,
+    });
+    expect(
+      store.retargetAgentTab(workspaceKey, "predecessor-agent", "successor-agent", "operation-1"),
+    ).toBeNull();
+
+    expect(
+      store
+        .getWorkspaceTabs(workspaceKey)
+        .map((tab) => tab.target)
+        .filter((target) => target.kind === "agent"),
+    ).toEqual([
+      { kind: "agent", agentId: "successor-agent" },
+      { kind: "agent", agentId: "predecessor-agent" },
     ]);
   });
 
