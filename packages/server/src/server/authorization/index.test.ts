@@ -119,6 +119,42 @@ describe("SessionAuthorization", () => {
     expect(authorization.allowsOutbound(outboundMessage("rpc_error"))).toBe(true);
   });
 
+  test("seat rotation control requires workspace write and revocation removes it", () => {
+    const viewer = new SessionAuthorization(["workspace.read"]);
+    const operator = new SessionAuthorization(["workspace.write"]);
+    const hub = new SessionAuthorization(["hub.execute"]);
+    for (const type of [
+      "agent.seat_rotation.request",
+      "agent.seat_rotation.cancel.request",
+    ] as const) {
+      expect(viewer.allowsInbound(inboundMessage(type))).toBe(false);
+      expect(hub.allowsInbound(inboundMessage(type))).toBe(false);
+      expect(operator.allowsInbound(inboundMessage(type))).toBe(true);
+    }
+    operator.replacePermissions([]);
+    expect(operator.allowsInbound(inboundMessage("agent.seat_rotation.request"))).toBe(false);
+    expect(operator.allowsInbound(inboundMessage("agent.seat_rotation.cancel.request"))).toBe(
+      false,
+    );
+  });
+
+  test("native and policy rotation receipts require workspace read in both directions", () => {
+    const viewer = new SessionAuthorization(["workspace.read"]);
+    const unrelated = new SessionAuthorization(["daemon.read", "hub.execute"]);
+    for (const operation of [
+      "agent.seat_rotation.inspect",
+      "agent.seat_rotation.predecessor.inspect",
+      "agent.seat_rotation.policy.inspect",
+    ] as const) {
+      const request = inboundMessage(`${operation}.request`);
+      const response = outboundMessage(`${operation}.response`);
+      expect(viewer.allowsInbound(request)).toBe(true);
+      expect(viewer.allowsOutbound(response)).toBe(true);
+      expect(unrelated.allowsInbound(request)).toBe(false);
+      expect(unrelated.allowsOutbound(response)).toBe(false);
+    }
+  });
+
   test("legacy Hub authority is translated at one compatibility boundary", () => {
     expect(permissionsForLegacyHubScopes(["hub.execution.*"])).toEqual(["hub.execute"]);
     expect(permissionsForLegacyHubScopes(["*"])).toEqual([]);
