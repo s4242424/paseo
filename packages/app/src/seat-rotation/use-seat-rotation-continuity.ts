@@ -5,13 +5,17 @@ import { useFetchQuery } from "@/data/query";
 import { useSessionStore } from "@/stores/session-store";
 import {
   resolveSeatRotationModel,
+  resolveSeatRotationPolicyModel,
   retainNewestSeatRotationInspection,
   type SeatRotationInspection,
   type SeatRotationModel,
+  type SeatRotationPolicyInspection,
+  type SeatRotationPolicyModel,
 } from "./model";
 
 export interface SeatRotationContinuityController {
   state: SeatRotationModel;
+  policyState: SeatRotationPolicyModel;
   cancel: () => void;
   isCancelling: boolean;
 }
@@ -27,13 +31,16 @@ export function useSeatRotationContinuity(input: {
   client: DaemonClient | null;
   isConnected: boolean;
   supported: boolean;
+  policySupported: boolean;
   retargetCurrentTab: (target: { kind: "agent"; agentId: string }) => void;
 }): SeatRotationContinuityController {
   const retargetCurrentTab = input.retargetCurrentTab;
   const enabled = input.supported && input.isConnected && input.client !== null;
+  const policyEnabled = input.policySupported && input.isConnected && input.client !== null;
   const [acceptedInspection, setAcceptedInspection] = useState<SeatRotationInspection>();
   const appliedSuccessRef = useRef<string | null>(null);
   const inspectedAgentStateRef = useRef<string | null>(null);
+  const inspectedPolicyAgentStateRef = useRef<string | null>(null);
   const predecessorArchivedAt = useSessionStore((state) => {
     const session = state.sessions[input.serverId];
     const predecessor =
@@ -44,10 +51,18 @@ export function useSeatRotationContinuity(input: {
   });
   const agentStateKey = useSessionStore((state) => {
     const session = state.sessions[input.serverId];
-    return [...(session?.agents.values() ?? [])]
-      .map((agent) => `${agent.id}:${agent.status}:${agent.archivedAt?.toISOString() ?? ""}`)
-      .sort()
-      .join("|");
+    return (
+      [...(session?.agents.values() ?? [])]
+        // Agent manager stamps updatedAt monotonically for every durable
+        // agent_state event. A second idle event can therefore trigger the
+        // receipt readback after the journal is durable without a timer.
+        .map(
+          (agent) =>
+            `${agent.id}:${agent.status}:${agent.archivedAt?.toISOString() ?? ""}:${agent.updatedAt.toISOString()}`,
+        )
+        .sort()
+        .join("|")
+    );
   });
   const hasSuccessorSnapshot = useSessionStore((state) => {
     const successorId = acceptedInspection?.successorId;
@@ -66,6 +81,18 @@ export function useSeatRotationContinuity(input: {
         throw new Error("The host client is unavailable.");
       }
       return await input.client.inspectAgentSeatRotationByPredecessor(input.predecessorId);
+    },
+    retry: false,
+  });
+
+  const policyInspection = useFetchQuery({
+    queryKey: ["seatRotationPolicy", input.serverId, input.predecessorId],
+    dataShape: "value",
+    staleTimeMs: 5_000,
+    enabled: policyEnabled,
+    queryFn: async (): Promise<SeatRotationPolicyInspection> => {
+      if (!input.client) throw new Error("The host client is unavailable.");
+      return await input.client.inspectAgentSeatRotationPolicy(input.predecessorId);
     },
     retry: false,
   });
@@ -114,6 +141,20 @@ export function useSeatRotationContinuity(input: {
     operationInspection,
   ]);
 
+  useEffect(() => {
+    if (!policyEnabled || !agentStateKey) return;
+    if (inspectedPolicyAgentStateRef.current === agentStateKey) return;
+    inspectedPolicyAgentStateRef.current = agentStateKey;
+    void policyInspection.refetch();
+  }, [agentStateKey, policyEnabled, policyInspection]);
+
+  useEffect(() => {
+    // A policy handoff identifies an intent, not a successor. Re-read the
+    // daemon-owned native receipt by predecessor and retain its normal snapshot gate.
+    if (policyInspection.data?.phase !== "native_handoff") return;
+    void inspection.refetch();
+  }, [inspection, policyInspection.data?.phase]);
+
   const state = useMemo(
     () =>
       resolveSeatRotationModel({
@@ -122,6 +163,10 @@ export function useSeatRotationContinuity(input: {
         hasSuccessorSnapshot,
       }),
     [acceptedInspection, hasSuccessorSnapshot, input.workspaceId],
+  );
+  const policyState = useMemo(
+    () => resolveSeatRotationPolicyModel(policyInspection.data),
+    [policyInspection.data],
   );
 
   useEffect(() => {
@@ -134,21 +179,32 @@ export function useSeatRotationContinuity(input: {
 
   const cancelMutation = useMutation({
     mutationFn: async () => {
-      if (!input.client || state.kind !== "pending") {
+      let operationId: string | null = null;
+      if (state.kind === "pending") {
+        operationId = state.operationId;
+      } else if (policyState.kind !== "idle") {
+        operationId = policyState.operationId;
+      }
+      if (!input.client || !operationId) {
         return;
       }
-      await input.client.cancelAgentSeatRotation(state.operationId, input.predecessorId);
-      await inspection.refetch();
+      await input.client.cancelAgentSeatRotation(operationId, input.predecessorId);
+      await Promise.all([inspection.refetch(), policyInspection.refetch()]);
     },
   });
   const cancel = useCallback(() => {
-    if (state.kind === "pending") {
+    if (
+      state.kind === "pending" ||
+      policyState.kind === "preparing" ||
+      policyState.kind === "nativeHandoff"
+    ) {
       cancelMutation.mutate();
     }
-  }, [cancelMutation, state.kind]);
+  }, [cancelMutation, policyState.kind, state.kind]);
 
   return {
     state,
+    policyState,
     cancel,
     isCancelling: cancelMutation.isPending,
   };

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   resolveSeatRotationModel,
+  resolveSeatRotationPolicyModel,
   retainNewestSeatRotationInspection,
   type SeatRotationInspection,
 } from "./model";
@@ -74,5 +75,56 @@ describe("seat rotation continuity", () => {
         operation,
       ),
     ).toEqual({ ...operation, revision: 8, phase: "succeeded", successorId: "successor-1" });
+  });
+});
+
+describe("seat rotation policy status", () => {
+  it("keeps ordinary and inactive seats quiet", () => {
+    expect(resolveSeatRotationPolicyModel(undefined)).toEqual({ kind: "idle" });
+    expect(
+      resolveSeatRotationPolicyModel({
+        operationId: null,
+        phase: "inactive",
+        reason: null,
+        goalContinuation: "checkpoint_only",
+      }),
+    ).toEqual({ kind: "idle" });
+  });
+
+  it("presents pre-native preparation and a native handoff without inventing a successor", () => {
+    expect(
+      resolveSeatRotationPolicyModel({
+        operationId: "policy-1",
+        phase: "preparing",
+        reason: null,
+        goalContinuation: "checkpoint_only",
+      }),
+    ).toEqual({ kind: "preparing", operationId: "policy-1", phase: "preparing" });
+    expect(
+      resolveSeatRotationPolicyModel({
+        operationId: "policy-1",
+        phase: "native_handoff",
+        reason: null,
+        goalContinuation: "checkpoint_only",
+      }),
+    ).toEqual({ kind: "nativeHandoff", operationId: "policy-1" });
+  });
+
+  it("keeps blocked, failed, and cancelled policy receipts recoverable", () => {
+    for (const phase of ["blocked", "failed", "cancelled"] as const) {
+      expect(
+        resolveSeatRotationPolicyModel({
+          operationId: "policy-1",
+          phase,
+          reason: "boundary_changed",
+          goalContinuation: "checkpoint_only",
+        }),
+      ).toEqual({
+        kind: "recoverable",
+        operationId: "policy-1",
+        phase,
+        reason: "boundary_changed",
+      });
+    }
   });
 });

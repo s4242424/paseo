@@ -391,6 +391,7 @@ function AgentPanel() {
   const client = useHostRuntimeClient(serverId);
   const isConnected = useHostRuntimeIsConnected(serverId);
   const supportsSeatRotation = useHostFeature(serverId, "nativeSeatRotation");
+  const supportsSeatRotationPolicy = useHostFeature(serverId, "seatRotationPolicyStatus");
   const seatRotation = useSeatRotationContinuity({
     serverId,
     workspaceId,
@@ -398,6 +399,7 @@ function AgentPanel() {
     client,
     isConnected,
     supported: supportsSeatRotation,
+    policySupported: supportsSeatRotationPolicy,
     retargetCurrentTab,
   });
 
@@ -1476,7 +1478,46 @@ function DockedChatSurface({ children, disabled }: { children: ReactNode; disabl
 }
 
 function SeatRotationCallout({ controller }: { controller: SeatRotationContinuityController }) {
-  if (controller.state.kind === "idle" || controller.state.kind === "ready") {
+  if (controller.state.kind === "ready") {
+    return null;
+  }
+
+  if (controller.state.kind === "idle") {
+    if (controller.policyState.kind === "preparing") {
+      return (
+        <View style={styles.seatRotationCallout} testID="seat-rotation-preparing">
+          <Text style={styles.seatRotationText}>Preparing this agent for its successor…</Text>
+          <Button
+            size="sm"
+            variant="secondary"
+            onPress={controller.cancel}
+            disabled={controller.isCancelling}
+            testID="seat-rotation-cancel"
+          >
+            {controller.isCancelling ? "Stopping…" : "Stop"}
+          </Button>
+        </View>
+      );
+    }
+
+    if (controller.policyState.kind === "nativeHandoff") {
+      return (
+        <View style={styles.seatRotationCallout} testID="seat-rotation-native-handoff">
+          <Text style={styles.seatRotationText}>Moving this agent to its successor…</Text>
+        </View>
+      );
+    }
+
+    if (controller.policyState.kind === "recoverable") {
+      const reason = controller.policyState.reason ?? controller.policyState.phase;
+      return (
+        <View style={styles.seatRotationCallout} testID="seat-rotation-policy-recoverable">
+          <Text style={styles.seatRotationText}>
+            Rotation preparation needs attention ({reason}). This agent is still available.
+          </Text>
+        </View>
+      );
+    }
     return null;
   }
 

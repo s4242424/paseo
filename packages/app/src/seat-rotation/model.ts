@@ -8,12 +8,65 @@ export interface SeatRotationInspection {
   failureCode: string | null;
 }
 
+export interface SeatRotationPolicyInspection {
+  operationId: string | null;
+  phase:
+    | "unsupported"
+    | "inactive"
+    | "latched"
+    | "preparing"
+    | "rotating"
+    | "native_handoff"
+    | "blocked"
+    | "failed"
+    | "cancelled"
+    | null;
+  reason: string | null;
+  goalContinuation: "checkpoint_only" | null;
+}
+
 export type SeatRotationModel =
   | { kind: "idle" }
   | { kind: "pending"; operationId: string }
   | { kind: "failed"; operationId: string; failureCode: string | null }
   | { kind: "waitingForSuccessor"; operationId: string }
   | { kind: "ready"; operationId: string; successorId: string };
+
+export type SeatRotationPolicyModel =
+  | { kind: "idle" }
+  | { kind: "preparing"; operationId: string; phase: "latched" | "preparing" | "rotating" }
+  | { kind: "nativeHandoff"; operationId: string }
+  | {
+      kind: "recoverable";
+      operationId: string;
+      phase: "blocked" | "failed" | "cancelled" | "unsupported";
+      reason: string | null;
+    };
+
+/** The pre-native policy is quiet until a configured seat actually advances. */
+export function resolveSeatRotationPolicyModel(
+  inspection: SeatRotationPolicyInspection | undefined,
+): SeatRotationPolicyModel {
+  if (!inspection?.operationId || !inspection.phase || inspection.phase === "inactive") {
+    return { kind: "idle" };
+  }
+  if (
+    inspection.phase === "latched" ||
+    inspection.phase === "preparing" ||
+    inspection.phase === "rotating"
+  ) {
+    return { kind: "preparing", operationId: inspection.operationId, phase: inspection.phase };
+  }
+  if (inspection.phase === "native_handoff") {
+    return { kind: "nativeHandoff", operationId: inspection.operationId };
+  }
+  return {
+    kind: "recoverable",
+    operationId: inspection.operationId,
+    phase: inspection.phase,
+    reason: inspection.reason,
+  };
+}
 
 /**
  * The durable receipt is the authority. A completed receipt does not retarget a
