@@ -18,6 +18,7 @@ import {
   ProviderSmokeCleanupError,
   type ProviderSmokeCleanupReport,
 } from "./provider-smoke-cleanup.js";
+import { waitForSeatRotationReceipt } from "./seat-rotation-receipt.js";
 
 const execFile = promisify(execFileCallback);
 const liveProviderSmoke = process.env.RUN_LIVE_PROVIDER_SMOKE === "1" ? test : test.skip;
@@ -245,29 +246,6 @@ async function awaitIdleCount(input: {
   });
 }
 
-async function awaitReceiptNotification(input: {
-  events: Array<{ at: string; agentId: string; status: string | null }>;
-  notifier: { signal: () => void };
-  agentId: string;
-}): Promise<void> {
-  const observed = input.events.filter((event) => event.agentId === input.agentId).length;
-  await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(
-      () =>
-        reject(
-          new Error(`Timed out waiting for durable receipt notification for ${input.agentId}`),
-        ),
-      ROTATION_TIMEOUT_MS,
-    );
-    input.notifier.signal = () => {
-      if (input.events.filter((event) => event.agentId === input.agentId).length > observed) {
-        clearTimeout(timer);
-        resolve();
-      }
-    };
-  });
-}
-
 async function assertRuntime(input: {
   client: DaemonClient;
   agentId: string;
@@ -485,10 +463,9 @@ async function runProvider(input: {
         throw new Error("native rotation accepted without an observable successor id");
       await input.persist();
       const successorStartedAt = new Date().toISOString();
-      // The second idle proves the real successor turn ended. After that
-      // event, native rotation writes its terminal receipt and re-emits normal
-      // successor state. Observe that distinct subsequent notification before
-      // inspecting; counting all historical idle events races the receipt.
+      // The second idle proves the real successor turn ended. Subscribe before
+      // reading the operation so a coalesced native update cannot race its
+      // durable receipt; the waiter reinspects only after an actual update.
       await awaitIdleCount({
         events,
         notifier,
@@ -501,7 +478,19 @@ async function runProvider(input: {
         request.successorId,
         input.expected.provider,
       );
-      await awaitReceiptNotification({ events, notifier, agentId: request.successorId });
+      rotation.terminal = await waitForSeatRotationReceipt({
+        timeoutMs: ROTATION_TIMEOUT_MS,
+        inspect: async () => await input.client.inspectAgentSeatRotation(operationId),
+        subscribe: (onAgentUpdate) =>
+          input.client.on("agent_update", (message) => {
+            if (
+              message.payload.kind === "upsert" &&
+              message.payload.agent.id === request.successorId
+            ) {
+              onAgentUpdate();
+            }
+          }),
+      });
       evidence.stageTimings.push({
         label: `successor-turn-${generation + 1}`,
         agentId: request.successorId,
@@ -512,7 +501,6 @@ async function runProvider(input: {
         outcome: successorTurn.outcome,
       });
       await input.persist();
-      rotation.terminal = await input.client.inspectAgentSeatRotation(operationId);
       expect(rotation.terminal).toMatchObject({
         phase: "succeeded",
         successorId: request.successorId,
