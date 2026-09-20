@@ -13,12 +13,35 @@ successor path.
 
 ## Enablement and seat binding
 
-Native handover is available only when `enableNativeSeatRotation` is `true`.
-Automatic threshold preparation additionally requires
-`seatRotationPolicy.enabled: true`. With either setting absent or false, no new
-native rotation or policy latch starts.
+The persisted configuration entry point is `$PASEO_HOME/config.json` (normally
+`~/.paseo/config.json`). `loadPersistedConfig()` reads that file and `loadConfig`
+maps its `daemon` block into the daemon bootstrap configuration. Do not add a
+second file or a command-line setup path for seat rotation.
 
-Each configured policy seat must have this exact shape:
+This is the minimal validated nesting. `version` is optional to the parser but
+is included to preserve the normal v1 config shape:
+
+```json
+{
+  "version": 1,
+  "daemon": {
+    "enableNativeSeatRotation": true,
+    "seatRotationPolicy": {
+      "enabled": false,
+      "seats": []
+    }
+  }
+}
+```
+
+`daemon.enableNativeSeatRotation` controls native handover. When it is absent
+or false, manual `rotateAgentSeat` requests are unavailable and a policy cannot
+complete a native handover. `daemon.seatRotationPolicy.enabled` controls only
+automatic threshold latching and preparation. When it is absent or false, it
+does not disable an otherwise enabled manual native request. Automatic rotation
+needs both settings enabled.
+
+Each `daemon.seatRotationPolicy.seats` entry must have this exact shape:
 
 ```json
 {
@@ -41,7 +64,9 @@ writer.
 The checkpoint and witness belong to the repository's existing handover home;
 the daemon does not create a new portfolio registry or transcript store. The
 handover root and checkpoint are resolved as real paths. The checkpoint must be
-a regular, non-symlink file below that root.
+a regular, non-symlink file below that root. Preserve the repository's canonical
+checkpoint owner and update protocol; configuration does not authorise a caller
+to overwrite that file blindly.
 
 ## Checkpoint, boundary, and policy
 
@@ -58,8 +83,12 @@ for the live provider session and active turn where `used / limit > 0.4`.
 Exactly 40% does not latch. A latch waits for an idle, permission-free boundary;
 user work that changes that boundary blocks it. The witness file must exist and
 change after a successor handover before a high-usage successor can rotate
-again. A missing or unchanged witness blocks the operation with a recorded
-reason, leaving the successor available rather than making a no-progress chain.
+again. It must represent real task progress, not a bootstrap, preparation-only,
+timestamp-only, or other incidental update. The current gate compares file
+hashes, so it proves that bytes changed, not that their meaning is task progress;
+the canonical checkpoint owner is responsible for that semantic contract. A
+missing or unchanged witness blocks the operation with a recorded reason,
+leaving the successor available rather than making a no-progress chain.
 
 The policy's durable journal records intent and preparation state. The native
 receipt remains the authority for admission, atomic writer fencing, predecessor
@@ -75,11 +104,93 @@ closure fail closed.
 
 ## Manual continuity and reconnect
 
-The manual path has the same safety contract as the policy: create the
-repository checkpoint at a safe boundary, retain an operation ID, then call
-`DaemonClient.rotateAgentSeat` with the matching predecessor, generation,
-handover root, checkpoint and explicit resume prompt. It is not safe to replace
-this with a direct archive/create sequence.
+The manual path has the same safety contract as the policy. It is not safe to
+replace it with a direct archive/create sequence. The minimal client sequence
+below assumes an already-connected, authorised `DaemonClient` and the
+repository's existing canonical checkpoint owner. It does not install, start or
+configure a daemon.
+
+```ts
+import { randomUUID } from "node:crypto";
+import type { DaemonClient } from "@getpaseo/client";
+
+interface CanonicalCheckpointOwner {
+  seal(input: {
+    operationId: string;
+    generation: number;
+    sessionId: string;
+    repoPath: string;
+    sourceRevision: string;
+    timelineRevision: number;
+    nextAction: string;
+  }): Promise<void>;
+}
+
+async function rotateAtCanonicalBoundary(input: {
+  client: DaemonClient;
+  checkpointOwner: CanonicalCheckpointOwner;
+  predecessorId: string;
+  predecessorSessionId: string;
+  generation: number;
+  repositoryPath: string;
+  sourceRevision: string;
+  handoverRoot: string;
+  checkpointPath: string;
+  resumePrompt: string;
+  nextAction: string;
+}) {
+  const operationId = randomUUID();
+  const before = await input.client.fetchAgentTimeline(input.predecessorId, {
+    direction: "tail",
+    projection: "canonical",
+    limit: 1,
+  });
+
+  await input.checkpointOwner.seal({
+    operationId,
+    generation: input.generation,
+    sessionId: input.predecessorSessionId,
+    repoPath: input.repositoryPath,
+    sourceRevision: input.sourceRevision,
+    timelineRevision: before.window.maxSeq,
+    nextAction: input.nextAction,
+  });
+
+  const after = await input.client.fetchAgentTimeline(input.predecessorId, {
+    direction: "tail",
+    projection: "canonical",
+    limit: 1,
+  });
+  if (after.window.maxSeq !== before.window.maxSeq) {
+    throw new Error("The predecessor advanced after the canonical checkpoint was sealed.");
+  }
+
+  const rotation = await input.client.rotateAgentSeat({
+    operationId,
+    predecessorId: input.predecessorId,
+    generation: input.generation,
+    handoverRoot: input.handoverRoot,
+    checkpointPath: input.checkpointPath,
+    resumePrompt: input.resumePrompt,
+  });
+  const policy = await input.client.inspectAgentSeatRotationPolicy(input.predecessorId);
+  const receipt = await input.client.inspectAgentSeatRotation(operationId);
+  return { rotation, policy, receipt };
+}
+```
+
+`CanonicalCheckpointOwner.seal` stands for the repository's established,
+atomic checkpoint-writing path. It must preserve the envelope fields shown and
+write `dirtyDisposition: "clean"`; it is deliberately not a blind file write in
+the client. The native operation independently reads the canonical timeline tail
+and rejects a changed boundary. In the automatic policy path, the preparation
+turn writes the envelope without guessing `timelineRevision`; the daemon seals
+that field after the turn ends and then revalidates the boundary.
+
+Use `inspectAgentSeatRotationPolicy(predecessorId)` to show policy state and
+`cancelAgentSeatRotation(operationId, predecessorId)` for an operator Stop. The
+cancel call returns the durable cancellation result; then inspect the operation
+receipt rather than assuming a successor was stopped.
 
 Persist the operation ID before requesting rotation. On reconnect, call
 `inspectAgentSeatRotation(operationId)` even if the predecessor is archived or
@@ -99,6 +210,16 @@ Rotation and cancellation require the daemon's existing `workspace.write`
 permission. Inspection requires `workspace.read`. These are daemon-wide
 capabilities, not new per-agent resource grants; authenticated restricted-client
 network qualification remains unproved.
+
+Policy cancellation is durable and keyed by `predecessorId` at
+`$PASEO_HOME/seat-rotation-policy/cancellations/<predecessorId>.json`. The
+current source exposes no reset or clear operation. Toggling
+`seatRotationPolicy.enabled`, sending ordinary work, or changing the witness
+does not clear it, so re-enabling automatic rotation for that same predecessor
+is unsupported. The supported recovery is an explicit manual native handover,
+when native rotation is enabled and the complete canonical checkpoint contract
+passes; its successor has a new predecessor ID. Do not delete a policy marker or
+native admission receipt to force same-seat re-entry.
 
 ## Rollback and limits
 
