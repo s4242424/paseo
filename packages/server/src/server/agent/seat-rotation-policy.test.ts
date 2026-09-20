@@ -27,10 +27,46 @@ test("latches only a fresh provider-confirmed observation strictly above 40 perc
   await expect(readFile(f.journalPath, "utf8")).resolves.toContain('"state":"latched"');
 });
 
+test("exposes inactive and pre-native latch state with explicit checkpoint-only continuation", async () => {
+  const f = await fixture();
+  await expect(f.policy.inspectByPredecessor(agentId)).resolves.toEqual({
+    operationId: null,
+    phase: "inactive",
+    reason: null,
+    goalContinuation: "checkpoint_only",
+  });
+  f.emit();
+  await f.flush();
+  await expect(f.policy.inspectByPredecessor(agentId)).resolves.toMatchObject({
+    operationId: expect.any(String),
+    phase: "latched",
+    goalContinuation: "checkpoint_only",
+  });
+});
+
 test("prepares through the manager, then delegates one native rotation at the safe boundary", async () => {
   const f = await fixture();
   f.emit();
   await f.flush();
+  await writePreparedCheckpoint(f);
+  const prepared = JSON.parse(await readFile(f.checkpointPath, "utf8")) as {
+    operationId: string;
+    generation: number;
+    sessionId: string;
+    repoPath: string;
+  };
+  const latched = JSON.parse(await readFile(f.journalPath, "utf8")) as {
+    operationId: string;
+    generation: number;
+    sessionId: string;
+    repositoryPath: string;
+  };
+  expect(prepared).toMatchObject({
+    operationId: latched.operationId,
+    generation: latched.generation,
+    sessionId: latched.sessionId,
+    repoPath: latched.repositoryPath,
+  });
 
   f.agent.lifecycle = "idle";
   f.agent.activeForegroundTurnId = null;
@@ -49,8 +85,10 @@ test("prepares through the manager, then delegates one native rotation at the sa
   f.emit();
   await f.flush();
 
+  await expect(f.policy.inspectByPredecessor(agentId)).resolves.toMatchObject({ reason: null });
   expect(f.requests).toHaveLength(1);
   expect(f.requests[0]).toMatchObject({ predecessorId: agentId, generation: 1 });
+  await expect(readFile(f.checkpointPath, "utf8")).resolves.toContain('"timelineRevision":7');
 });
 
 test("a Stop cancels a latched preparation and later observations do not replay it", async () => {
@@ -94,6 +132,9 @@ async function fixture() {
     getAgent(id: string) {
       return id === agentId ? agent : null;
     },
+    getTimelineRows() {
+      return [{ seq: 7 }];
+    },
     subscribe(listener: (event: AgentManagerEvent) => void) {
       callback = listener;
       return () => {
@@ -104,7 +145,7 @@ async function fixture() {
       prompts.push(prompt);
       return (async function* () {})();
     },
-  } as unknown as Pick<AgentManager, "getAgent" | "subscribe" | "streamAgent">;
+  } as unknown as Pick<AgentManager, "getAgent" | "getTimelineRows" | "subscribe" | "streamAgent">;
   const native = {
     async rotate(request: unknown) {
       requests.push(request);
@@ -127,6 +168,7 @@ async function fixture() {
           checkpointPath,
           progressWitnessPath: witnessPath,
           resumePrompt: "Read the checkpoint and continue.",
+          goalContinuation: "checkpoint_only",
         },
       ],
     }),
@@ -134,6 +176,7 @@ async function fixture() {
   policy.start();
   return {
     agent,
+    checkpointPath,
     journalPath: path.join(
       root,
       "paseo-home",
@@ -153,6 +196,28 @@ async function fixture() {
       await policy.waitForAgent(agentId);
     },
   };
+}
+
+async function writePreparedCheckpoint(f: Awaited<ReturnType<typeof fixture>>): Promise<void> {
+  const journal = JSON.parse(await readFile(f.journalPath, "utf8")) as {
+    operationId: string;
+    generation: number;
+    sessionId: string;
+    repositoryPath: string;
+  };
+  await writeFile(
+    f.checkpointPath,
+    JSON.stringify({
+      operationId: journal.operationId,
+      generation: journal.generation,
+      sessionId: journal.sessionId,
+      repoPath: journal.repositoryPath,
+      sourceRevision: "abcdef0",
+      timelineRevision: 0,
+      dirtyDisposition: "clean",
+      nextAction: "continue",
+    }),
+  );
 }
 
 function createAgent(repo: string): ManagedAgent {

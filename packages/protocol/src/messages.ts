@@ -221,6 +221,8 @@ const SeatRotationPolicySeatSchema = z
     checkpointPath: z.string().min(1),
     progressWitnessPath: z.string().min(1),
     resumePrompt: z.string().min(1),
+    // Native rotation resumes an explicit prompt; it cannot transfer provider goals.
+    goalContinuation: z.literal("checkpoint_only"),
   })
   .strict();
 
@@ -2061,6 +2063,37 @@ export const AgentSeatRotationPredecessorInspectResponseMessageSchema = z.object
   }),
 });
 
+// COMPAT(seatRotationPolicyStatus): added in v0.8.0; old hosts ignore this feature-gated request.
+export const AgentSeatRotationPolicyInspectRequestMessageSchema = z.object({
+  type: z.literal("agent.seat_rotation.policy.inspect.request"),
+  requestId: z.string(),
+  predecessorId: z.string().uuid(),
+});
+
+export const AgentSeatRotationPolicyInspectResponseMessageSchema = z.object({
+  type: z.literal("agent.seat_rotation.policy.inspect.response"),
+  payload: z.object({
+    requestId: z.string(),
+    operationId: z.string().uuid().nullable(),
+    phase: z
+      .enum([
+        "unsupported",
+        "inactive",
+        "latched",
+        "preparing",
+        "rotating",
+        "native_handoff",
+        "blocked",
+        "failed",
+        "cancelled",
+      ])
+      .nullable(),
+    reason: z.string().nullable(),
+    goalContinuation: z.literal("checkpoint_only").nullable(),
+    error: z.string().nullable(),
+  }),
+});
+
 export const AgentDetachResponseMessageSchema = z.object({
   type: z.literal("agent.detach.response"),
   payload: AgentActionResponsePayloadSchema,
@@ -3284,6 +3317,7 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   AgentSeatRotationCancelRequestMessageSchema,
   AgentSeatRotationInspectRequestMessageSchema,
   AgentSeatRotationPredecessorInspectRequestMessageSchema,
+  AgentSeatRotationPolicyInspectRequestMessageSchema,
   AgentRewindRequestMessageSchema,
   AgentPermissionResponseMessageSchema,
   CheckoutStatusRequestSchema,
@@ -3557,6 +3591,8 @@ export const ServerInfoStatusPayloadSchema = z
         agentRequestReceipts: z.boolean().optional(),
         // COMPAT(nativeSeatRotation): added in v0.8.0; remove gate after 2027-09-19.
         nativeSeatRotation: z.boolean().optional(),
+        // COMPAT(seatRotationPolicyStatus): added in v0.8.0; old hosts do not expose pre-native state.
+        seatRotationPolicyStatus: z.boolean().optional(),
         // COMPAT(hubAgentRpc): added in v0.8.0; remove gate after 2027-03-05.
         hubAgentRpc: z.boolean().optional(),
         providersSnapshot: z.boolean().optional(),
@@ -6695,6 +6731,7 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   AgentSeatRotationCancelResponseMessageSchema,
   AgentSeatRotationInspectResponseMessageSchema,
   AgentSeatRotationPredecessorInspectResponseMessageSchema,
+  AgentSeatRotationPolicyInspectResponseMessageSchema,
   AgentRewindResponseMessageSchema,
   UpdateAgentResponseMessageSchema,
   ProjectRenameResponseSchema,

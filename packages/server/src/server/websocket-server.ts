@@ -1654,6 +1654,7 @@ export class VoiceAssistantWebSocketServer {
         agentRequestReceipts: true,
         // COMPAT(nativeSeatRotation): added in v0.8.0; remove gate after 2027-09-19.
         nativeSeatRotation: this.nativeSeatRotation.isEnabled(),
+        seatRotationPolicyStatus: true,
         hubAgentRpc: true,
         // COMPAT(directorySync): added in v0.3.x, remove gate after 2027-02-12.
         directorySync: true,

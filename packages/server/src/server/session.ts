@@ -2450,6 +2450,8 @@ export class Session {
         return this.handleAgentSeatRotationInspectRequest(msg);
       case "agent.seat_rotation.predecessor.inspect.request":
         return this.handleAgentSeatRotationPredecessorInspectRequest(msg);
+      case "agent.seat_rotation.policy.inspect.request":
+        return this.handleAgentSeatRotationPolicyInspectRequest(msg);
       default:
         return undefined;
     }
@@ -7750,6 +7752,19 @@ export class Session {
         if (!resolved.ok || resolved.agentId !== msg.predecessorId) {
           throw new Error("rotation predecessor is unknown");
         }
+        if (await this.seatRotationPolicy.cancelForPredecessor(msg.predecessorId)) {
+          this.emit({
+            type: "agent.seat_rotation.cancel.response",
+            payload: {
+              requestId: msg.requestId,
+              accepted: true,
+              state: "cancelled",
+              successorId: null,
+              error: null,
+            },
+          });
+          return;
+        }
       }
       const result = await this.nativeSeatRotation.cancel(msg.operationId, msg.predecessorId);
       this.emit({
@@ -7851,6 +7866,34 @@ export class Session {
           sourceRevision: null,
           revision: null,
           failureCode: null,
+          error: errorToFriendlyMessage(error),
+        },
+      });
+    }
+  }
+
+  private async handleAgentSeatRotationPolicyInspectRequest(
+    msg: Extract<SessionInboundMessage, { type: "agent.seat_rotation.policy.inspect.request" }>,
+  ): Promise<void> {
+    try {
+      const resolved = await this.resolveAgentIdentifier(msg.predecessorId);
+      if (!resolved.ok || resolved.agentId !== msg.predecessorId) {
+        throw new Error("rotation predecessor is unknown");
+      }
+      const state = await this.seatRotationPolicy.inspectByPredecessor(msg.predecessorId);
+      this.emit({
+        type: "agent.seat_rotation.policy.inspect.response",
+        payload: { requestId: msg.requestId, ...state, error: null },
+      });
+    } catch (error) {
+      this.emit({
+        type: "agent.seat_rotation.policy.inspect.response",
+        payload: {
+          requestId: msg.requestId,
+          operationId: null,
+          phase: null,
+          reason: null,
+          goalContinuation: null,
           error: errorToFriendlyMessage(error),
         },
       });

@@ -2770,6 +2770,41 @@ export class DaemonClient {
     };
   }
 
+  async inspectAgentSeatRotationPolicy(predecessorId: string): Promise<{
+    operationId: string | null;
+    phase:
+      | "unsupported"
+      | "inactive"
+      | "latched"
+      | "preparing"
+      | "rotating"
+      | "native_handoff"
+      | "blocked"
+      | "failed"
+      | "cancelled"
+      | null;
+    reason: string | null;
+    goalContinuation: "checkpoint_only" | null;
+  }> {
+    // COMPAT(seatRotationPolicyStatus): added in v0.8.0; no old-host fallback is safe.
+    if (this.lastServerInfoMessage?.features?.seatRotationPolicyStatus !== true) {
+      throw new Error("Update the host to inspect seat rotation policy state.");
+    }
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"agent.seat_rotation.policy.inspect.response">(
+        {
+          message: { type: "agent.seat_rotation.policy.inspect.request", predecessorId },
+        },
+      );
+    if (payload.error) throw new Error(payload.error);
+    return {
+      operationId: payload.operationId,
+      phase: payload.phase,
+      reason: payload.reason,
+      goalContinuation: payload.goalContinuation,
+    };
+  }
+
   async detachAgent(agentId: string): Promise<void> {
     const payload = await this.sendNamespacedCorrelatedSessionRequest<"agent.detach.response">({
       message: {

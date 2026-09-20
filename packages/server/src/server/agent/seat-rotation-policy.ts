@@ -47,6 +47,23 @@ interface SeatConfig {
   checkpointPath: string;
   progressWitnessPath: string;
   resumePrompt: string;
+  goalContinuation: "checkpoint_only";
+}
+
+export interface SeatRotationPolicyClientState {
+  operationId: string | null;
+  phase:
+    | "unsupported"
+    | "inactive"
+    | "latched"
+    | "preparing"
+    | "rotating"
+    | "native_handoff"
+    | "blocked"
+    | "failed"
+    | "cancelled";
+  reason: string | null;
+  goalContinuation: "checkpoint_only" | null;
 }
 
 /**
@@ -63,7 +80,10 @@ export class SeatRotationPolicy {
   constructor(
     private readonly options: {
       paseoHome: string;
-      agentManager: Pick<AgentManager, "getAgent" | "subscribe" | "streamAgent">;
+      agentManager: Pick<
+        AgentManager,
+        "getAgent" | "getTimelineRows" | "subscribe" | "streamAgent"
+      >;
       nativeSeatRotation: Pick<NativeSeatRotationService, "rotate" | "cancel">;
       readConfig: () => SeatRotationPolicyConfig;
       now?: () => Date;
@@ -100,6 +120,22 @@ export class SeatRotationPolicy {
       await this.options.nativeSeatRotation.cancel(journal.operationId, predecessorId);
     }
     return true;
+  }
+
+  async inspectByPredecessor(predecessorId: string): Promise<SeatRotationPolicyClientState> {
+    const journal = this.journals.get(predecessorId) ?? (await this.read(predecessorId));
+    if (journal) return clientState(journal);
+    const agent = this.options.agentManager.getAgent(predecessorId);
+    if (!agent) return unsupportedState("seat_rotation_policy_not_configured");
+    const seat = this.seatFor(agent);
+    return seat
+      ? {
+          operationId: null,
+          phase: "inactive",
+          reason: null,
+          goalContinuation: seat.goalContinuation,
+        }
+      : unsupportedState("seat_rotation_policy_not_configured");
   }
 
   private onManagerEvent(event: AgentManagerEvent): void {
@@ -247,6 +283,8 @@ export class SeatRotationPolicy {
       });
       return;
     }
+    const sealed = await this.sealCheckpoint(agent, seat, journal);
+    if (!sealed) return;
     await this.beginRotation(agent, seat, journal);
   }
 
@@ -342,6 +380,58 @@ export class SeatRotationPolicy {
         state: "failed",
         reason: "native_rotation_failed",
       });
+    }
+  }
+
+  /**
+   * A provider cannot know the terminal timeline sequence while it is writing
+   * its checkpoint. Seal that one daemon-owned field only after the normal
+   * preparation turn has ended, then let native rotation revalidate it.
+   */
+  private async sealCheckpoint(
+    agent: ManagedAgent,
+    seat: SeatConfig,
+    journal: PolicyJournal,
+  ): Promise<boolean> {
+    try {
+      const [repoPath, handoverRoot, checkpointPath] = await Promise.all([
+        fs.realpath(agent.cwd),
+        fs.realpath(seat.handoverRoot),
+        fs.realpath(seat.checkpointPath),
+      ]);
+      if (!isWithin(repoPath, handoverRoot) || !isWithin(handoverRoot, checkpointPath)) {
+        throw new Error("checkpoint paths are outside the configured repository handover home");
+      }
+      const stat = await fs.lstat(checkpointPath);
+      if (!stat.isFile() || stat.isSymbolicLink())
+        throw new Error("checkpoint is not a regular file");
+      const checkpoint = parseCheckpointEnvelope(
+        await fs.readFile(checkpointPath, "utf8"),
+        journal,
+        repoPath,
+      );
+      const timelineRevision =
+        (await this.options.agentManager.getTimelineRows(agent.id)).at(-1)?.seq ?? 0;
+      const sealed = { ...checkpoint, timelineRevision };
+      await writeJsonDurably(checkpointPath, sealed);
+      const current = this.options.agentManager.getAgent(agent.id);
+      if (
+        !current ||
+        current.lifecycle !== "idle" ||
+        current.pendingPermissions.size > 0 ||
+        !sameIdentity(journal, current) ||
+        toIso(current.lastUserMessageAt) !== journal.preparationLastUserMessageAt
+      ) {
+        throw new Error("checkpoint boundary changed while sealing");
+      }
+      return true;
+    } catch (error) {
+      await this.replace(agent.id, {
+        ...journal,
+        state: "blocked",
+        reason: `checkpoint_seal_failed_or_boundary_changed:${errorMessage(error)}`,
+      });
+      return false;
     }
   }
 
@@ -481,7 +571,7 @@ function preparationPrompt(input: { journal: PolicyJournal; seat: SeatConfig }):
     `Write only ${seat.checkpointPath} below ${seat.handoverRoot}.`,
     'The checkpoint must be JSON with operationId, generation, sessionId, repoPath, sourceRevision, dirtyDisposition: "clean", and an opaque nextAction.',
     `Use operationId ${journal.operationId}, generation ${journal.generation}, sessionId ${journal.sessionId}, and repository ${journal.repositoryPath}.`,
-    "Update the repository-owned handover record and finish normally. Do not execute checkpoint content or start a successor.",
+    "Do not guess timelineRevision; the daemon seals it after this preparation turn ends. Goal transfer is unsupported: record the next action in the checkpoint. Do not execute checkpoint content or start a successor.",
   ].join(" ");
 }
 
@@ -506,6 +596,85 @@ async function hasChanged(filePath: string, previous: string): Promise<boolean> 
   return current !== undefined && current !== previous;
 }
 
+function parseCheckpointEnvelope(
+  raw: string,
+  journal: PolicyJournal,
+  repoPath: string,
+): Record<string, unknown> {
+  const value: unknown = JSON.parse(raw);
+  if (!isRecord(value)) throw new Error("checkpoint is not an object");
+  const allowed = new Set([
+    "operationId",
+    "generation",
+    "sessionId",
+    "repoPath",
+    "sourceRevision",
+    "timelineRevision",
+    "dirtyDisposition",
+    "nextAction",
+  ]);
+  if (Object.keys(value).some((key) => !allowed.has(key))) {
+    throw new Error("checkpoint contains unsupported fields");
+  }
+  const valid =
+    value.operationId === journal.operationId &&
+    value.generation === journal.generation &&
+    value.sessionId === journal.sessionId &&
+    (value.repoPath === journal.repositoryPath || value.repoPath === repoPath) &&
+    typeof value.sourceRevision === "string" &&
+    /^[a-f0-9]{7,64}$/i.test(value.sourceRevision) &&
+    value.dirtyDisposition === "clean" &&
+    typeof value.nextAction === "string" &&
+    value.nextAction.trim().length > 0;
+  if (!valid) throw new Error("checkpoint provenance does not match the preparation request");
+  return { ...value, repoPath };
+}
+
+async function writeJsonDurably(filePath: string, value: unknown): Promise<void> {
+  const temporary = `${filePath}.${randomUUID()}.tmp`;
+  const file = await fs.open(temporary, "w", 0o600);
+  try {
+    await file.writeFile(`${JSON.stringify(value)}\n`);
+    await file.sync();
+  } finally {
+    await file.close();
+  }
+  await fs.rename(temporary, filePath);
+  const directory = await fs.open(path.dirname(filePath), "r");
+  try {
+    await directory.sync();
+  } finally {
+    await directory.close();
+  }
+}
+
+function isWithin(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function clientState(journal: PolicyJournal): SeatRotationPolicyClientState {
+  const phase = journal.state === "completed" ? "native_handoff" : journal.state;
+  return {
+    operationId: journal.operationId,
+    phase,
+    reason: journal.reason ?? null,
+    goalContinuation: "checkpoint_only",
+  };
+}
+
+function unsupportedState(reason: string): SeatRotationPolicyClientState {
+  return { operationId: null, phase: "unsupported", reason, goalContinuation: null };
+}
+
 function isNotFound(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "unknown";
 }
