@@ -16,7 +16,9 @@ import {
   reloadWorkspace,
 } from "../support/helpers/archive-tab";
 import { expectAgentTabActive, getTabTestIds } from "../support/helpers/launcher";
+import { getServerId } from "../support/helpers/server-id";
 import { createTempGitRepo } from "../support/helpers/workspace";
+import { waitForWorkspaceInSidebar } from "../support/helpers/workspace-ui";
 
 test.use({ e2eDaemonConfig: { version: 1, daemon: { enableNativeSeatRotation: true } } });
 
@@ -28,6 +30,10 @@ interface RotationClient {
     agentId: string,
     options: { direction: "tail"; projection: "canonical"; limit: number },
   ): Promise<{ window: { maxSeq: number } }>;
+  fetchAgentHistory(options: {
+    page: { limit: number };
+  }): Promise<{ entries: Array<{ agent: { id: string; workspaceId?: string | null } }> }>;
+  fetchWorkspaces(): Promise<{ entries: Array<{ id: string }> }>;
   rotateAgentSeat(input: {
     operationId: string;
     predecessorId: string;
@@ -52,14 +58,15 @@ test.describe("Seat rotation continuity", () => {
     });
     if (!created.workspace)
       throw new Error(created.error ?? "Could not create seat-rotation workspace.");
+    const workspace = created.workspace;
     const predecessor = await createMockIdleAgent(client, {
       cwd: repo.path,
-      workspaceId: created.workspace.id,
+      workspaceId: workspace.id,
       title: "rotating-predecessor",
     });
     const control = await createMockIdleAgent(client, {
       cwd: repo.path,
-      workspaceId: created.workspace.id,
+      workspaceId: workspace.id,
       title: "rotation-control",
     });
     const historicalPrompt = "Keep this predecessor history readable.";
@@ -78,12 +85,23 @@ test.describe("Seat rotation continuity", () => {
       expect(tabIds.filter((id) => id === `workspace-tab-agent_${successorId}`)).toHaveLength(1);
       expect(tabIds.filter((id) => id === `workspace-tab-agent_${predecessor.id}`)).toHaveLength(0);
 
-      await reloadWorkspace(page, created.workspace.id);
+      await reloadWorkspace(page, workspace.id);
+      await waitForWorkspaceInSidebar(page, {
+        serverId: getServerId(),
+        workspaceId: workspace.id,
+      });
       await expectWorkspaceTabVisible(page, successorId);
       await expectAgentTabActive(page, successorId);
       await expectWorkspaceTabHidden(page, predecessor.id);
       await openSessions(page);
       await expectSessionRowVisible(page, predecessor.title);
+      const history = await client.fetchAgentHistory({ page: { limit: 200 } });
+      expect(
+        history.entries.find((entry) => entry.agent.id === predecessor.id)?.agent.workspaceId,
+      ).toBe(workspace.id);
+      expect(
+        (await client.fetchWorkspaces()).entries.some((entry) => entry.id === workspace.id),
+      ).toBe(true);
       await clickSessionRow(page, predecessor.title);
       await expectWorkspaceTabVisible(page, predecessor.id);
       await expectAgentTabActive(page, predecessor.id);
@@ -95,7 +113,7 @@ test.describe("Seat rotation continuity", () => {
       // Opening an archived session from ordinary History is deliberate
       // historical navigation, not a second logical seat. It survives a
       // reconnect/reload beside the successor without being retargeted again.
-      await reloadWorkspace(page, created.workspace.id);
+      await reloadWorkspace(page, workspace.id);
       await expectWorkspaceTabVisible(page, successorId);
       await expectWorkspaceTabVisible(page, predecessor.id);
       await expectAgentTabActive(page, predecessor.id);

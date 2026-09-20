@@ -155,6 +155,7 @@ export function useWorkspaceSeatRotationContinuity(input: {
       const receipt = acceptedInspections.get(predecessor.id) ?? inspection.data;
       if (
         receipt?.phase !== "succeeded" ||
+        !receipt.operationId ||
         !receipt.successorId ||
         !knownSnapshotAgentIds.has(receipt.successorId)
       ) {
