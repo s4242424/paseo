@@ -3561,6 +3561,31 @@ describe("workspace-layout-store actions", () => {
     ).toEqual(["agent_parent-agent"]);
   });
 
+  it("keeps an archived predecessor tab while its durable successor linkage is inspected", () => {
+    const workspaceKey = createWorkspaceKey();
+    const store = workspaceLayoutStore.getState();
+    store.openTab({
+      workspaceKey,
+      target: { kind: "agent", agentId: "predecessor-agent" },
+      intent: "reveal",
+    });
+
+    store.reconcileTabs(workspaceKey, {
+      agentsHydrated: true,
+      terminalsHydrated: true,
+      activeAgentIds: [],
+      autoOpenAgentIds: [],
+      knownAgentIds: ["predecessor-agent"],
+      continuityAgentIds: ["predecessor-agent"],
+      standaloneTerminalIds: [],
+    });
+
+    expect(store.getWorkspaceTabs(workspaceKey).map((tab) => tab.target)).toContainEqual({
+      kind: "agent",
+      agentId: "predecessor-agent",
+    });
+  });
+
   it("openTab reveal intent reopens hidden subagent tabs and clears hidden intent", () => {
     const workspaceKey = createWorkspaceKey();
     const store = workspaceLayoutStore.getState();

@@ -96,6 +96,8 @@ import {
   useHostRuntimeSnapshot,
   useHosts,
 } from "@/runtime/host-runtime";
+import { useHostFeature } from "@/runtime/host-features";
+import { useWorkspaceSeatRotationContinuity } from "@/seat-rotation/use-workspace-seat-rotation-continuity";
 import { prefetchProvidersSnapshot } from "@/hooks/use-providers-snapshot";
 import {
   shouldSeedWorkspaceSetupTab,
@@ -1836,6 +1838,33 @@ function WorkspaceScreenContent({
     () => (workspaceLayout ? collectAllTabs(workspaceLayout.root) : EMPTY_UI_TABS),
     [workspaceLayout],
   );
+  const sessionAgents = useSessionStore(
+    (state) => state.sessions[normalizedServerId]?.agents ?? null,
+  );
+  const sessionAgentDetails = useSessionStore(
+    (state) => state.sessions[normalizedServerId]?.agentDetails ?? null,
+  );
+  const tabAgentArchiveState = useMemo(() => {
+    const archiveState = new Map<string, string | null>();
+    for (const tab of uiTabs) {
+      if (tab.target.kind !== "agent") continue;
+      const agent =
+        sessionAgents?.get(tab.target.agentId) ??
+        sessionAgentDetails?.get(tab.target.agentId) ??
+        null;
+      archiveState.set(tab.target.agentId, agent?.archivedAt?.toISOString() ?? null);
+    }
+    return archiveState;
+  }, [sessionAgentDetails, sessionAgents, uiTabs]);
+  const supportsSeatRotation = useHostFeature(normalizedServerId, "nativeSeatRotation");
+  const continuityAgentIds = useWorkspaceSeatRotationContinuity({
+    serverId: normalizedServerId,
+    tabs: uiTabs,
+    agentArchiveState: tabAgentArchiveState,
+    client,
+    isConnected,
+    supported: supportsSeatRotation,
+  });
   useOpenAgentTabLabels({
     client,
     serverId: normalizedServerId,
@@ -2048,6 +2077,7 @@ function WorkspaceScreenContent({
         terminalsHydrated: terminalsQuery.isSuccess,
         knownTerminalIds,
         standaloneTerminalIds,
+        continuityAgentIds,
         hasActivePendingTerminalCreate:
           createTerminalMutation.isPending || pendingTerminalCreateInput !== null,
         hasActivePendingDraftCreate: hasActivePendingDraftCreateInWorkspace,
@@ -2058,6 +2088,7 @@ function WorkspaceScreenContent({
     hasHydratedWorkspaceLayoutStore,
     pendingTerminalCreateInput,
     createTerminalMutation.isPending,
+    continuityAgentIds,
     isRouteFocused,
     normalizedServerId,
     normalizedWorkspaceId,
