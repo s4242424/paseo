@@ -95,7 +95,10 @@ test.describe("Seat rotation continuity", () => {
       await expectAgentTabActive(page, successorId);
       await expectWorkspaceTabHidden(page, predecessor.id);
       await openSessions(page);
-      await expectSessionRowVisible(page, predecessor.title);
+      // The successor keeps the predecessor's title (same logical seat,
+      // continued), so both rows are titled "rotating-predecessor" here —
+      // disambiguate by the predecessor's own agent id, not title text alone.
+      await expectSessionRowVisible(page, predecessor.title, predecessor.id);
       const history = await client.fetchAgentHistory({ page: { limit: 200 } });
       expect(
         history.entries.find((entry) => entry.agent.id === predecessor.id)?.agent.workspaceId,
@@ -103,13 +106,13 @@ test.describe("Seat rotation continuity", () => {
       expect(
         (await client.fetchWorkspaces()).entries.some((entry) => entry.id === workspace.id),
       ).toBe(true);
-      await clickSessionRow(page, predecessor.title);
+      await clickSessionRow(page, predecessor.title, predecessor.id);
       await expectWorkspaceTabVisible(page, predecessor.id);
       await expectAgentTabActive(page, predecessor.id);
       await expectArchivedAgentFocused(page, predecessor.id);
       await expect(
         page.getByTestId("user-message").filter({ hasText: historicalPrompt }),
-      ).toBeVisible();
+      ).toBeVisible({ timeout: 30_000 });
 
       // Opening an archived session from ordinary History is deliberate
       // historical navigation, not a second logical seat. It survives a

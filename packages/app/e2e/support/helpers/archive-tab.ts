@@ -255,26 +255,58 @@ export async function openSessions(page: Page): Promise<void> {
 
 const AGENT_ROW_SELECTOR = '[data-testid^="agent-row-"]';
 
-function getSessionRowByTitle(page: Page, title: string) {
+// Exact row testid (`agent-row-{serverId}-{agentId}`) is a prefix of the
+// selector above but never contains the sub-field variants
+// (`agent-row-workspace-…`, `agent-row-project-…`, `agent-row-branch-…`), so
+// this always resolves to the one row element, never a child field.
+function getSessionRowById(page: Page, agentId: string) {
+  return page.locator(`[data-testid="agent-row-${getServerId()}-${agentId}"]`);
+}
+
+// Title text is not a unique row key: a native seat rotation's successor
+// keeps the predecessor's title (it is the same logical seat continuing), so
+// History legitimately shows two rows with identical text while both exist.
+// `.first()` here picks whichever row happens to render first in DOM order,
+// which is not necessarily the one the caller means — pass `agentId` whenever
+// the row's identity (not just its title) matters, e.g. reopening a specific
+// archived predecessor that survives alongside a same-titled successor.
+function getSessionRowByTitle(page: Page, title: string, agentId?: string) {
+  if (agentId) {
+    return getSessionRowById(page, agentId);
+  }
   return page.locator(AGENT_ROW_SELECTOR).filter({ hasText: title }).first();
 }
 
-export async function expectSessionRowVisible(page: Page, title: string): Promise<void> {
-  await expect(getSessionRowByTitle(page, title)).toBeVisible({ timeout: 30_000 });
+export async function expectSessionRowVisible(
+  page: Page,
+  title: string,
+  agentId?: string,
+): Promise<void> {
+  await expect(getSessionRowByTitle(page, title, agentId)).toBeVisible({ timeout: 30_000 });
 }
 
-export async function expectSessionRowArchived(page: Page, title: string): Promise<void> {
-  await expect(getSessionRowByTitle(page, title)).toContainText("Archived", { timeout: 30_000 });
-}
-
-export async function expectSessionRowNotArchived(page: Page, title: string): Promise<void> {
-  await expect(getSessionRowByTitle(page, title)).not.toContainText("Archived", {
+export async function expectSessionRowArchived(
+  page: Page,
+  title: string,
+  agentId?: string,
+): Promise<void> {
+  await expect(getSessionRowByTitle(page, title, agentId)).toContainText("Archived", {
     timeout: 30_000,
   });
 }
 
-export async function clickSessionRow(page: Page, title: string): Promise<void> {
-  const row = getSessionRowByTitle(page, title);
+export async function expectSessionRowNotArchived(
+  page: Page,
+  title: string,
+  agentId?: string,
+): Promise<void> {
+  await expect(getSessionRowByTitle(page, title, agentId)).not.toContainText("Archived", {
+    timeout: 30_000,
+  });
+}
+
+export async function clickSessionRow(page: Page, title: string, agentId?: string): Promise<void> {
+  const row = getSessionRowByTitle(page, title, agentId);
   await expect(row).toBeVisible({ timeout: 30_000 });
   await row.click();
 }
