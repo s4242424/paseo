@@ -76,6 +76,16 @@ describe("seat rotation continuity", () => {
       ),
     ).toEqual({ ...operation, revision: 8, phase: "succeeded", successorId: "successor-1" });
   });
+
+  it("retains the accepted receipt when an equal revision is read again", () => {
+    const current = {
+      ...operation,
+      revision: 8,
+      phase: "succeeded" as const,
+      successorId: "successor-1",
+    };
+    expect(retainNewestSeatRotationInspection(current, { ...current })).toBe(current);
+  });
 });
 
 describe("seat rotation policy status", () => {

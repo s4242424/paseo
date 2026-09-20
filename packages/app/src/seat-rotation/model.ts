@@ -114,7 +114,7 @@ export function retainNewestSeatRotationInspection(
     current?.operationId === incoming.operationId &&
     typeof current.revision === "number" &&
     typeof incoming.revision === "number" &&
-    incoming.revision < current.revision
+    incoming.revision <= current.revision
   ) {
     return current;
   }

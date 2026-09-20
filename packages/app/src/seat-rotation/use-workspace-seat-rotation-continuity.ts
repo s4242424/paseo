@@ -32,6 +32,13 @@ export function useWorkspaceSeatRotationContinuity(input: {
         .map((id) => ({ id, archivedAt: input.agentArchiveState.get(id) ?? null })),
     [input.agentArchiveState, input.tabs],
   );
+  const predecessorKey = useMemo(
+    () =>
+      predecessors
+        .map((predecessor) => `${predecessor.id}:${predecessor.archivedAt ?? ""}`)
+        .join("|"),
+    [predecessors],
+  );
   const enabled = input.supported && input.isConnected && input.client !== null;
   const [acceptedInspections, setAcceptedInspections] = useState<
     ReadonlyMap<string, SeatRotationInspection>
@@ -76,6 +83,11 @@ export function useWorkspaceSeatRotationContinuity(input: {
       retry: false,
     })),
   );
+  const inspectionsRef = useRef(inspections);
+  inspectionsRef.current = inspections;
+  const predecessorsRef = useRef(predecessors);
+  predecessorsRef.current = predecessors;
+  const inspectedAgentStateKey = useRef<string | null>(null);
 
   useEffect(() => {
     setAcceptedInspections((current) => {
@@ -97,8 +109,10 @@ export function useWorkspaceSeatRotationContinuity(input: {
 
   useEffect(() => {
     if (!enabled || !input.client || !agentStateKey) return;
-    for (const [index, inspection] of inspections.entries()) {
-      const predecessor = predecessors[index];
+    if (inspectedAgentStateKey.current === agentStateKey) return;
+    inspectedAgentStateKey.current = agentStateKey;
+    for (const [index, inspection] of inspectionsRef.current.entries()) {
+      const predecessor = predecessorsRef.current[index];
       if (!predecessor) continue;
       const accepted = acceptedInspectionsRef.current.get(predecessor.id);
       if (!accepted?.operationId) {
@@ -122,16 +136,16 @@ export function useWorkspaceSeatRotationContinuity(input: {
         })
         .catch(() => undefined);
     }
-  }, [agentStateKey, enabled, input.client, inspections, predecessors]);
+  }, [agentStateKey, enabled, input.client, predecessorKey]);
 
   const appliedSuccesses = useRef(new Set<string>());
   useEffect(() => {
     if (!enabled) return;
     for (const [index, inspection] of inspections.entries()) {
       const predecessor = predecessors[index];
+      if (!predecessor) continue;
       const receipt = acceptedInspections.get(predecessor.id) ?? inspection.data;
       if (
-        !predecessor ||
         receipt?.phase !== "succeeded" ||
         !receipt.successorId ||
         !knownSnapshotAgentIds.has(receipt.successorId)
