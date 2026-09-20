@@ -143,6 +143,63 @@ test("a Stop cancels a latched preparation and later observations do not replay 
   await expect(readFile(f.journalPath, "utf8")).resolves.toContain('"state":"cancelled"');
 });
 
+test("a Stop that races the initial latch leaves its durable terminal marker", async () => {
+  const f = await fixture();
+  f.emit();
+  await expect(f.policy.cancelForPredecessor(agentId)).resolves.toBe(true);
+  await f.flush();
+  await expect(f.policy.inspectByPredecessor(agentId)).resolves.toMatchObject({
+    phase: "cancelled",
+  });
+});
+
+test("a Stop during preparation cannot be overwritten by later manager state", async () => {
+  const f = await fixture();
+  f.emit();
+  await f.flush();
+  f.agent.lifecycle = "idle";
+  f.agent.activeForegroundTurnId = null;
+  f.emit();
+  await f.flush();
+  expect(f.prompts).toHaveLength(1);
+  await expect(f.policy.cancelForPredecessor(agentId)).resolves.toBe(true);
+  f.agent.lifecycle = "running";
+  f.agent.activeForegroundTurnId = "preparation-turn";
+  f.emit();
+  await f.flush();
+  await expect(f.policy.inspectByPredecessor(agentId)).resolves.toMatchObject({
+    phase: "cancelled",
+  });
+});
+
+test("a Stop during a delayed checkpoint seal remains terminal", async () => {
+  const f = await fixture({ holdTimeline: true });
+  const sealing = advanceToSeal(f, false);
+  while (!f.timelineRequested()) await new Promise((resolve) => setImmediate(resolve));
+  await expect(f.policy.cancelForPredecessor(agentId)).resolves.toBe(true);
+  f.releaseTimeline();
+  await sealing;
+  await f.flush();
+  await expect(f.policy.inspectByPredecessor(agentId)).resolves.toMatchObject({
+    phase: "cancelled",
+  });
+  expect(f.requests).toHaveLength(0);
+});
+
+test("a Stop during delayed native rotation cannot resume or overwrite cancellation", async () => {
+  const f = await fixture({ holdRotate: true });
+  const sealing = advanceToSeal(f, false);
+  while (!f.rotateRequested()) await new Promise((resolve) => setImmediate(resolve));
+  await expect(f.policy.cancelForPredecessor(agentId)).resolves.toBe(true);
+  f.releaseRotate();
+  await sealing;
+  await f.flush();
+  await expect(f.policy.inspectByPredecessor(agentId)).resolves.toMatchObject({
+    phase: "cancelled",
+  });
+  expect(f.nativeCancels).toHaveLength(1);
+});
+
 test("blocks a latched seat when human work changes its safe boundary", async () => {
   const f = await fixture();
   f.emit();
@@ -195,7 +252,19 @@ test("an immediately high successor remains blocked until its configured witness
   );
 });
 
-async function fixture() {
+test("a missing progress witness fails closed before any rotation is prepared", async () => {
+  const f = await fixture();
+  await rm(f.witnessPath);
+  f.emit();
+  await f.flush();
+  await expect(f.policy.inspectByPredecessor(agentId)).resolves.toMatchObject({
+    phase: "blocked",
+    reason: "progress_witness_missing",
+  });
+  expect(f.prompts).toHaveLength(0);
+});
+
+async function fixture(options?: { holdRotate?: boolean; holdTimeline?: boolean }) {
   const root = await mkdtemp(path.join(os.tmpdir(), "seat-rotation-policy-"));
   roots.push(root);
   const repo = path.join(root, "repo");
@@ -207,6 +276,17 @@ async function fixture() {
   let callback: ((event: AgentManagerEvent) => void) | undefined;
   const prompts: string[] = [];
   const requests: unknown[] = [];
+  const nativeCancels: unknown[] = [];
+  let releaseRotate: (() => void) | undefined;
+  const waitForRotate = new Promise<void>((resolve) => {
+    releaseRotate = resolve;
+  });
+  let rotateRequested = false;
+  let releaseTimeline: (() => void) | undefined;
+  const waitForTimeline = new Promise<void>((resolve) => {
+    releaseTimeline = resolve;
+  });
+  let timelineRequested = false;
   const liveAgents: ManagedAgent[] = [];
   const agent = createAgent(repo);
   const manager = {
@@ -214,6 +294,8 @@ async function fixture() {
       return id === agentId ? agent : null;
     },
     getTimelineRows() {
+      timelineRequested = true;
+      if (options?.holdTimeline) return waitForTimeline.then(() => [{ seq: 7 }]);
       return [{ seq: 7 }];
     },
     listAgents() {
@@ -236,9 +318,12 @@ async function fixture() {
   const native = {
     async rotate(request: unknown) {
       requests.push(request);
+      rotateRequested = true;
+      if (options?.holdRotate) await waitForRotate;
       return { accepted: true, operation: { successorId: null } };
     },
-    async cancel() {
+    async cancel(...args: unknown[]) {
+      nativeCancels.push(args);
       return { accepted: true, operation: null };
     },
   } as unknown as Pick<NativeSeatRotationService, "rotate" | "cancel">;
@@ -262,6 +347,7 @@ async function fixture() {
     }),
   });
   policy.start();
+  await policy.waitForReady();
   return {
     agent,
     checkpointPath,
@@ -273,10 +359,15 @@ async function fixture() {
       `${agentId}.json`,
     ),
     liveAgents,
+    nativeCancels,
     policy,
     progressGates: (policy as unknown as { progressGates: Map<string, string> }).progressGates,
     prompts,
     requests,
+    releaseRotate: releaseRotate!,
+    releaseTimeline: releaseTimeline!,
+    rotateRequested: () => rotateRequested,
+    timelineRequested: () => timelineRequested,
     witnessPath,
     emit() {
       callback?.({ type: "agent_state", agent: { ...agent } });
@@ -285,6 +376,28 @@ async function fixture() {
       await policy.waitForAgent(agentId);
     },
   };
+}
+
+async function advanceToSeal(
+  f: Awaited<ReturnType<typeof fixture>>,
+  waitForFinal = true,
+): Promise<void> {
+  f.emit();
+  await f.flush();
+  await writePreparedCheckpoint(f);
+  f.agent.lifecycle = "idle";
+  f.agent.activeForegroundTurnId = null;
+  f.emit();
+  await f.flush();
+  f.agent.lifecycle = "running";
+  f.agent.activeForegroundTurnId = "preparation-turn";
+  f.agent.lastUserMessageAt = new Date();
+  f.emit();
+  await f.flush();
+  f.agent.lifecycle = "idle";
+  f.agent.activeForegroundTurnId = null;
+  f.emit();
+  if (waitForFinal) await f.flush();
 }
 
 async function writePreparedCheckpoint(f: Awaited<ReturnType<typeof fixture>>): Promise<void> {

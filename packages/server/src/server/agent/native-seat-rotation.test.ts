@@ -17,6 +17,7 @@ afterEach(async () => {
 
 async function fixture(options?: {
   holdCreate?: boolean;
+  holdTimeline?: boolean;
   emptyResume?: boolean;
   failStop?: boolean;
 }) {
@@ -54,6 +55,11 @@ async function fixture(options?: {
   const waitForCreate = new Promise<void>((resolve) => {
     releaseCreate = resolve;
   });
+  let releaseTimeline: (() => void) | undefined;
+  const waitForTimeline = new Promise<void>((resolve) => {
+    releaseTimeline = resolve;
+  });
+  let timelineRequested = false;
   const predecessor = agent({
     id: predecessorId,
     repoPath: realRepoPath,
@@ -73,6 +79,8 @@ async function fixture(options?: {
     },
     setNativeSeatRotationAdmissionLookup() {},
     async getTimelineRows() {
+      timelineRequested = true;
+      if (options?.holdTimeline) await waitForTimeline;
       return [];
     },
     endNativeSeatRotationAdmission() {
@@ -119,6 +127,8 @@ async function fixture(options?: {
     checkpointPath,
     handoverRoot,
     releaseCreate: releaseCreate!,
+    releaseTimeline: releaseTimeline!,
+    timelineRequested: () => timelineRequested,
     service,
     journalPath: path.join(
       root,
@@ -231,6 +241,26 @@ test("a predecessor Stop records intent before the first journal and prevents ad
     operation: null,
   });
   await expect(rotation).resolves.toMatchObject({
+    accepted: false,
+    operation: { state: "cancelled" },
+  });
+  expect(f.calls).not.toContain("admit");
+  expect(f.calls).not.toContain("archive");
+  expect(f.calls).not.toContain("resume");
+});
+
+test("a queued valid request inherits the pre-journal Stop owner after an invalid first request", async () => {
+  const f = await fixture({ holdTimeline: true });
+  const invalid = f.service.rotate({ ...request(f), operationId: crypto.randomUUID() });
+  const valid = f.service.rotate(request(f));
+  await expect(invalid).rejects.toThrow("provenance");
+  while (!f.timelineRequested()) await new Promise((resolve) => setImmediate(resolve));
+  await expect(f.service.cancelForPredecessor(predecessorId)).resolves.toMatchObject({
+    accepted: true,
+    operation: null,
+  });
+  f.releaseTimeline();
+  await expect(valid).resolves.toMatchObject({
     accepted: false,
     operation: { state: "cancelled" },
   });

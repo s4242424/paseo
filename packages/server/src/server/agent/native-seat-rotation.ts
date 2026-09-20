@@ -136,6 +136,12 @@ export class NativeSeatRotationService {
       // Keep the first pre-journal intent visible to normal Stop. A concurrent
       // invalid request must not replace and then clear that owner before its
       // durable receipt has been written.
+      // If that first request failed before its receipt, a queued request must
+      // become the visible owner before it reaches its own async pre-journal
+      // validation window.
+      if (!this.predecessorOperations.has(request.predecessorId)) {
+        this.predecessorOperations.set(request.predecessorId, request.operationId);
+      }
       try {
         return await this.withOperationLock(
           request.operationId,

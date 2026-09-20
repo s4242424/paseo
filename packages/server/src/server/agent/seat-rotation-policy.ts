@@ -75,8 +75,11 @@ export interface SeatRotationPolicyClientState {
 export class SeatRotationPolicy {
   private readonly tails = new Map<string, Promise<void>>();
   private readonly journals = new Map<string, PolicyJournal>();
-  private readonly progressGates = new Map<string, string>();
+  /** A hash requires progress; null is a durable fail-closed missing witness. */
+  private readonly progressGates = new Map<string, string | null>();
   private unsubscribe: (() => void) | null = null;
+  private started = false;
+  private ready: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly options: {
@@ -92,30 +95,51 @@ export class SeatRotationPolicy {
   ) {}
 
   start(): void {
-    if (this.unsubscribe) return;
-    this.unsubscribe = this.options.agentManager.subscribe((event) => this.onManagerEvent(event), {
-      replayState: true,
-    });
-    void this.reconcile();
+    if (this.started) return;
+    this.started = true;
+    // Restore successor gates before replay can make a fresh successor look
+    // like a new, unprotected seat.
+    this.ready = this.reconcile()
+      .then(() => {
+        if (!this.started) return undefined;
+        this.unsubscribe = this.options.agentManager.subscribe(
+          (event) => this.onManagerEvent(event),
+          {
+            replayState: true,
+          },
+        );
+        return undefined;
+      })
+      .catch(() => {
+        this.started = false;
+        return undefined;
+      });
   }
 
   stop(): void {
+    this.started = false;
     this.unsubscribe?.();
     this.unsubscribe = null;
   }
 
   async waitForAgent(agentId: string): Promise<void> {
+    await this.ready;
     await this.tails.get(agentId);
+  }
+
+  async waitForReady(): Promise<void> {
+    await this.ready;
   }
 
   async cancelForPredecessor(predecessorId: string): Promise<boolean> {
     const journal = this.journals.get(predecessorId) ?? (await this.read(predecessorId));
-    if (!journal || isTerminal(journal.state)) return false;
-    const cancelled = await this.write({
-      ...journal,
-      state: "cancelled",
-      reason: "cancelled_by_user",
-    });
+    // A latch write can already be in flight when Stop arrives. Its durable
+    // marker makes every later policy write converge to cancelled.
+    if (!journal && !this.tails.has(predecessorId)) return false;
+    await this.writeCancellation(predecessorId);
+    if (!journal) return true;
+    if (isTerminal(journal.state)) return journal.state === "cancelled";
+    const cancelled = await this.writeCancelled(journal);
     this.journals.set(predecessorId, cancelled);
     if (journal.state === "rotating") {
       await this.options.nativeSeatRotation.cancel(journal.operationId, predecessorId);
@@ -162,6 +186,7 @@ export class SeatRotationPolicy {
   private async onAgentState(agent: ManagedAgent): Promise<void> {
     const seat = this.seatFor(agent);
     if (!seat) return;
+    await this.restoreSuccessorProgressGate(agent, seat);
     const journal = this.journals.get(agent.id) ?? (await this.read(agent.id));
     if (journal) this.journals.set(agent.id, journal);
     if (journal?.state === "cancelled") return;
@@ -183,7 +208,12 @@ export class SeatRotationPolicy {
   private async latch(agent: ManagedAgent, seat: SeatConfig): Promise<void> {
     if (!this.isValidThresholdObservation(agent)) return;
     const progressGate = this.progressGates.get(agent.id);
-    const blocked = progressGate && !(await hasChanged(seat.progressWitnessPath, progressGate));
+    const initialWitness =
+      progressGate === undefined ? await fingerprint(seat.progressWitnessPath) : true;
+    const missingWitness = progressGate === null || initialWitness === undefined;
+    const blocked =
+      missingWitness ||
+      (progressGate !== undefined && !(await hasChanged(seat.progressWitnessPath, progressGate)));
     const observation = agent.lastUsage!.contextWindowObservation!;
     const journal = await this.write({
       version: 1,
@@ -191,12 +221,16 @@ export class SeatRotationPolicy {
       predecessorId: agent.id,
       generation: 1,
       repositoryPath: agent.cwd,
-      sessionId: agent.persistence!.sessionId,
+      sessionId: currentSessionId(agent)!,
       observedTurnId: observation.turnId,
       state: blocked ? "blocked" : "latched",
       observedAt: observation.observedAt,
       lastUserMessageAt: toIso(agent.lastUserMessageAt),
-      ...(blocked ? { reason: "no_progress_immediate_retrigger" } : {}),
+      ...(blocked
+        ? {
+            reason: missingWitness ? "progress_witness_missing" : "no_progress_immediate_retrigger",
+          }
+        : {}),
       updatedAt: this.now().toISOString(),
     });
     this.journals.set(agent.id, journal);
@@ -331,6 +365,7 @@ export class SeatRotationPolicy {
   ): Promise<void> {
     const preparing = await this.write({ ...journal, state: "preparing" });
     this.journals.set(agent.id, preparing);
+    if (preparing.state === "cancelled") return;
     try {
       const stream = this.options.agentManager.streamAgent(
         agent.id,
@@ -360,6 +395,7 @@ export class SeatRotationPolicy {
   ): Promise<void> {
     const rotating = await this.write({ ...journal, state: "rotating" });
     this.journals.set(agent.id, rotating);
+    if (rotating.state === "cancelled") return;
     const request: NativeSeatRotationRequest = {
       operationId: rotating.operationId,
       predecessorId: agent.id,
@@ -374,8 +410,7 @@ export class SeatRotationPolicy {
       const progressWitnessHash = successorId
         ? await fingerprint(seat.progressWitnessPath)
         : undefined;
-      if (successorId && progressWitnessHash)
-        this.progressGates.set(successorId, progressWitnessHash);
+      if (successorId) this.progressGates.set(successorId, progressWitnessHash ?? null);
       await this.replace(agent.id, {
         ...rotating,
         state: result.accepted ? "completed" : "blocked",
@@ -423,6 +458,7 @@ export class SeatRotationPolicy {
         (await this.options.agentManager.getTimelineRows(agent.id)).at(-1)?.seq ?? 0;
       const sealed = { ...checkpoint, timelineRevision };
       await writeJsonDurably(checkpointPath, sealed);
+      if (await this.isCancelled(agent.id)) return false;
       const current = this.options.agentManager.getAgent(agent.id);
       if (
         !current ||
@@ -456,6 +492,9 @@ export class SeatRotationPolicy {
       const journal = await this.read(entry.slice(0, -5));
       if (!journal) continue;
       this.journals.set(journal.predecessorId, journal);
+      if (journal.state === "completed" && journal.successorId) {
+        this.progressGates.set(journal.successorId, journal.progressWitnessHash ?? null);
+      }
       if (journal.state === "preparing") {
         await this.replace(journal.predecessorId, {
           ...journal,
@@ -501,13 +540,61 @@ export class SeatRotationPolicy {
     return writers.length === 1 && writers[0]?.id === agent.id ? seat : null;
   }
 
+  /**
+   * Native rotation may start the successor before rotate() returns to this
+   * policy. Recover its gate from the native receipt so that a fresh usage
+   * event in that interval cannot obtain an unbounded second rotation.
+   */
+  private async restoreSuccessorProgressGate(agent: ManagedAgent, seat: SeatConfig): Promise<void> {
+    if (this.progressGates.has(agent.id)) return;
+    const policyJournal = Array.from(this.journals.values()).find(
+      (journal) => journal.successorId === agent.id && journal.repositoryPath === agent.cwd,
+    );
+    if (policyJournal) {
+      this.progressGates.set(agent.id, policyJournal.progressWitnessHash ?? null);
+      return;
+    }
+    let entries: string[];
+    try {
+      entries = await fs.readdir(path.join(this.options.paseoHome, "seat-rotations", "operations"));
+    } catch (error) {
+      if (isNotFound(error)) return;
+      throw error;
+    }
+    for (const entry of entries.filter((name) => name.endsWith(".json"))) {
+      try {
+        const value: unknown = JSON.parse(
+          await fs.readFile(
+            path.join(this.options.paseoHome, "seat-rotations", "operations", entry),
+            "utf8",
+          ),
+        );
+        if (
+          !isRecord(value) ||
+          value.successorId !== agent.id ||
+          typeof value.predecessorId !== "string"
+        )
+          continue;
+        const journal =
+          this.journals.get(value.predecessorId) ?? (await this.read(value.predecessorId));
+        if (!journal || journal.repositoryPath !== agent.cwd) continue;
+        this.progressGates.set(agent.id, (await fingerprint(seat.progressWitnessPath)) ?? null);
+        return;
+      } catch {
+        // A torn native receipt never authorises a successor rotation.
+        this.progressGates.set(agent.id, null);
+        return;
+      }
+    }
+  }
+
   private isValidThresholdObservation(agent: ManagedAgent): boolean {
     const observation = agent.lastUsage?.contextWindowObservation;
     if (
       !observation ||
       observation.contextWindowSource !== "provider-confirmed" ||
-      !agent.persistence?.sessionId ||
-      observation.sessionId !== agent.persistence.sessionId ||
+      !currentSessionId(agent) ||
+      observation.sessionId !== currentSessionId(agent) ||
       observation.turnId !== agent.activeForegroundTurnId ||
       agent.lifecycle !== "running"
     ) {
@@ -551,7 +638,74 @@ export class SeatRotationPolicy {
   }
 
   private async write(journal: PolicyJournal): Promise<PolicyJournal> {
+    if (journal.state !== "cancelled" && (await this.isCancelled(journal.predecessorId))) {
+      return await this.writeCancelled(journal);
+    }
     const next = { ...journal, updatedAt: this.now().toISOString() };
+    await fs.mkdir(this.journalDirectory(), { recursive: true, mode: 0o700 });
+    const target = this.journalPath(next.predecessorId);
+    const temporary = `${target}.${randomUUID()}.tmp`;
+    const file = await fs.open(temporary, "w", 0o600);
+    try {
+      await file.writeFile(`${JSON.stringify(next)}\n`);
+      await file.sync();
+    } finally {
+      await file.close();
+    }
+    await fs.rename(temporary, target);
+    const directory = await fs.open(this.journalDirectory(), "r");
+    try {
+      await directory.sync();
+    } finally {
+      await directory.close();
+    }
+    // Stop may have latched while this atomic write was in progress.
+    return journal.state !== "cancelled" && (await this.isCancelled(journal.predecessorId))
+      ? await this.writeCancelled(next)
+      : next;
+  }
+
+  private journalDirectory(): string {
+    return path.join(this.options.paseoHome, "seat-rotation-policy", "operations");
+  }
+
+  private journalPath(predecessorId: string): string {
+    return path.join(this.journalDirectory(), `${predecessorId}.json`);
+  }
+
+  private cancellationDirectory(): string {
+    return path.join(this.options.paseoHome, "seat-rotation-policy", "cancellations");
+  }
+
+  private cancellationPath(predecessorId: string): string {
+    return path.join(this.cancellationDirectory(), `${predecessorId}.json`);
+  }
+
+  private async writeCancellation(predecessorId: string): Promise<void> {
+    await fs.mkdir(this.cancellationDirectory(), { recursive: true, mode: 0o700 });
+    await writeJsonDurably(this.cancellationPath(predecessorId), {
+      predecessorId,
+      requestedAt: this.now().toISOString(),
+    });
+  }
+
+  private async isCancelled(predecessorId: string): Promise<boolean> {
+    try {
+      await fs.access(this.cancellationPath(predecessorId));
+      return true;
+    } catch (error) {
+      if (isNotFound(error)) return false;
+      throw error;
+    }
+  }
+
+  private async writeCancelled(journal: PolicyJournal): Promise<PolicyJournal> {
+    const next = {
+      ...journal,
+      state: "cancelled" as const,
+      reason: "cancelled_by_user",
+      updatedAt: this.now().toISOString(),
+    };
     await fs.mkdir(this.journalDirectory(), { recursive: true, mode: 0o700 });
     const target = this.journalPath(next.predecessorId);
     const temporary = `${target}.${randomUUID()}.tmp`;
@@ -572,21 +726,17 @@ export class SeatRotationPolicy {
     return next;
   }
 
-  private journalDirectory(): string {
-    return path.join(this.options.paseoHome, "seat-rotation-policy", "operations");
-  }
-
-  private journalPath(predecessorId: string): string {
-    return path.join(this.journalDirectory(), `${predecessorId}.json`);
-  }
-
   private now(): Date {
     return this.options.now?.() ?? new Date();
   }
 }
 
 function sameIdentity(journal: PolicyJournal, agent: ManagedAgent): boolean {
-  return agent.cwd === journal.repositoryPath && agent.persistence?.sessionId === journal.sessionId;
+  return agent.cwd === journal.repositoryPath && currentSessionId(agent) === journal.sessionId;
+}
+
+function currentSessionId(agent: ManagedAgent): string | null {
+  return agent.runtimeInfo?.sessionId ?? agent.persistence?.sessionId ?? null;
 }
 
 function isTerminal(state: PolicyState): boolean {

@@ -26,9 +26,16 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-test("real daemon manager hands a busy valid observation through preparation and native rotation", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "seat-rotation-policy-actual-"));
-  roots.push(root);
+async function setupActual(
+  input: {
+    earlySuccessorUsage?: boolean;
+    paseoHomeRoot?: string;
+    cleanup?: boolean;
+  } = {},
+) {
+  const root =
+    input.paseoHomeRoot ?? (await mkdtemp(path.join(os.tmpdir(), "seat-rotation-policy-actual-")));
+  if (!input.paseoHomeRoot) roots.push(root);
   const repo = path.join(root, "repo");
   const handoverRoot = path.join(repo, ".handover");
   const checkpointPath = path.join(handoverRoot, "checkpoint.json");
@@ -46,8 +53,13 @@ test("real daemon manager hands a busy valid observation through preparation and
   const revision = execFileSync("git", ["-C", repoPath, "rev-parse", "HEAD"], {
     encoding: "utf8",
   }).trim();
-  const provider = new ControlledClient({ checkpointPath, repoPath, revision });
+  const provider = new ControlledClient(
+    { checkpointPath, repoPath, revision },
+    { earlySuccessorUsage: input.earlySuccessorUsage },
+  );
   const daemon = await createTestPaseoDaemon({
+    paseoHomeRoot: input.paseoHomeRoot ?? root,
+    cleanup: input.cleanup ?? !input.paseoHomeRoot,
     enableNativeSeatRotation: true,
     seatRotationPolicy: {
       enabled: true,
@@ -74,6 +86,21 @@ test("real daemon manager hands a busy valid observation through preparation and
   await daemon.daemon.agentManager.setLabels(predecessor.id, {
     "paseo.seat-id": "integration-seat",
   });
+  return {
+    checkpointPath,
+    client,
+    daemon,
+    handoverRoot,
+    predecessor,
+    provider,
+    repoPath,
+    root,
+    witnessPath,
+  };
+}
+
+test("real daemon manager hands a busy valid observation through preparation and native rotation", async () => {
+  const { checkpointPath, client, daemon, predecessor, provider } = await setupActual();
 
   await client.sendMessage(predecessor.id, "continue current work");
   await vi.waitFor(() =>
@@ -103,6 +130,167 @@ test("real daemon manager hands a busy valid observation through preparation and
   expect(daemon.daemon.agentManager.getAgent(predecessor.id)).toBeNull();
 });
 
+test("an early high successor event is progress-gated before policy rotation returns", async () => {
+  const { checkpointPath, client, daemon, predecessor, provider } = await setupActual({
+    earlySuccessorUsage: true,
+  });
+  await client.sendMessage(predecessor.id, "continue current work");
+  await vi.waitFor(() =>
+    expect(daemon.daemon.agentManager.getAgent(predecessor.id)?.lifecycle).toBe("running"),
+  );
+  await provider.sessions.at(-1)!.emitUsage(41, 100);
+  await provider.sessions.at(-1)!.complete();
+  await vi.waitFor(async () => {
+    const checkpoint = JSON.parse(await readFile(checkpointPath, "utf8")) as {
+      operationId: string;
+    };
+    const operation = await client.inspectAgentSeatRotation(checkpoint.operationId);
+    expect(operation.phase).toBe("succeeded");
+    expect(operation.successorId).toEqual(expect.any(String));
+    await expect(
+      client.inspectAgentSeatRotationPolicy(operation.successorId!),
+    ).resolves.toMatchObject({
+      phase: "blocked",
+      reason: "no_progress_immediate_retrigger",
+    });
+  });
+  expect(provider.preparationPrompts).toHaveLength(1);
+});
+
+test("actual manager rejects high observations without provider-confirmed provenance", async () => {
+  const { client, daemon, predecessor, provider } = await setupActual();
+  await client.sendMessage(predecessor.id, "continue current work");
+  await vi.waitFor(() =>
+    expect(daemon.daemon.agentManager.getAgent(predecessor.id)?.lifecycle).toBe("running"),
+  );
+  await provider.sessions.at(-1)!.emitUsage(41, 100, "catalog-fallback");
+  await provider.sessions.at(-1)!.complete();
+  await vi.waitFor(() =>
+    expect(daemon.daemon.agentManager.getAgent(predecessor.id)?.lifecycle).toBe("idle"),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  expect(provider.preparationPrompts).toHaveLength(0);
+  await expect(client.inspectAgentSeatRotationPolicy(predecessor.id)).resolves.toMatchObject({
+    phase: "inactive",
+  });
+});
+
+test("normal Stop makes a latched policy terminal before a later high observation", async () => {
+  const { client, daemon, predecessor, provider } = await setupActual();
+  await client.sendMessage(predecessor.id, "continue current work");
+  await vi.waitFor(() =>
+    expect(daemon.daemon.agentManager.getAgent(predecessor.id)?.lifecycle).toBe("running"),
+  );
+  await provider.sessions.at(-1)!.emitUsage(41, 100);
+  await vi.waitFor(async () => {
+    await expect(client.inspectAgentSeatRotationPolicy(predecessor.id)).resolves.toMatchObject({
+      phase: "latched",
+    });
+  });
+  await client.cancelAgent(predecessor.id);
+  await vi.waitFor(async () => {
+    await expect(client.inspectAgentSeatRotationPolicy(predecessor.id)).resolves.toMatchObject({
+      phase: "cancelled",
+    });
+  });
+  await client.sendMessage(predecessor.id, "continue after Stop");
+  await vi.waitFor(() =>
+    expect(daemon.daemon.agentManager.getAgent(predecessor.id)?.lifecycle).toBe("running"),
+  );
+  await provider.sessions.at(-1)!.emitUsage(41, 100);
+  await provider.sessions.at(-1)!.complete();
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  expect(provider.preparationPrompts).toHaveLength(0);
+});
+
+test("daemon restart restores a successor progress gate before replayed state", async () => {
+  const f = await setupActual({ cleanup: false });
+  await f.client.sendMessage(f.predecessor.id, "continue current work");
+  await vi.waitFor(() =>
+    expect(f.daemon.daemon.agentManager.getAgent(f.predecessor.id)?.lifecycle).toBe("running"),
+  );
+  await f.provider.sessions.at(-1)!.emitUsage(41, 100);
+  await f.provider.sessions.at(-1)!.complete();
+  let checkpoint: { operationId: string; successorId: string } | undefined;
+  await vi.waitFor(async () => {
+    const value = JSON.parse(await readFile(f.checkpointPath, "utf8")) as { operationId: string };
+    const operation = await f.client.inspectAgentSeatRotation(value.operationId);
+    expect(operation.phase).toBe("succeeded");
+    expect(operation.successorId).toEqual(expect.any(String));
+    checkpoint = { operationId: value.operationId, successorId: operation.successorId! };
+  });
+  const successorId = checkpoint!.successorId;
+  await vi.waitFor(async () => {
+    await expect(f.client.inspectAgentSeatRotationPolicy(f.predecessor.id)).resolves.toMatchObject({
+      phase: "native_handoff",
+    });
+  });
+  clients.splice(clients.indexOf(f.client), 1);
+  daemons.splice(daemons.indexOf(f.daemon), 1);
+  await f.client.close();
+  await f.daemon.close();
+
+  const restarted = await createTestPaseoDaemon({
+    paseoHomeRoot: f.root,
+    cleanup: false,
+    enableNativeSeatRotation: true,
+    seatRotationPolicy: {
+      enabled: true,
+      seats: [
+        {
+          seatId: "integration-seat",
+          repositoryPath: f.repoPath,
+          handoverRoot: f.handoverRoot,
+          checkpointPath: f.checkpointPath,
+          progressWitnessPath: f.witnessPath,
+          resumePrompt: "Read the checkpoint and continue.",
+          goalContinuation: "checkpoint_only",
+        },
+      ],
+    },
+    agentClients: { codex: f.provider },
+  });
+  daemons.push(restarted);
+  const client = new DaemonClient({ url: `ws://127.0.0.1:${restarted.port}/ws` });
+  clients.push(client);
+  await client.connect();
+  await client.fetchAgents({ subscribe: { subscriptionId: "policy-restart" } });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  await client.refreshAgent(successorId);
+  await vi.waitFor(() =>
+    expect(restarted.daemon.agentManager.getAgent(successorId)).not.toBeNull(),
+  );
+  await client.sendMessage(successorId, "continue current work");
+  await vi.waitFor(() =>
+    expect(restarted.daemon.agentManager.getAgent(successorId)?.lifecycle).toBe("running"),
+  );
+  const activeSession = f.provider.sessions.find((session) => session.hasActiveTurn());
+  expect(activeSession).toBeDefined();
+  await activeSession!.emitUsage(41, 100);
+  await vi.waitFor(() =>
+    expect(
+      restarted.daemon.agentManager.getAgent(successorId)?.lastUsage?.contextWindowObservation
+        ?.usedTokens,
+    ).toBe(41),
+  );
+  expect(
+    restarted.daemon.agentManager.getAgent(successorId)?.lastUsage?.contextWindowObservation
+      ?.sessionId,
+  ).toBe(restarted.daemon.agentManager.getAgent(successorId)?.runtimeInfo?.sessionId);
+  expect(
+    restarted.daemon.agentManager.getAgent(successorId)?.lastUsage?.contextWindowObservation
+      ?.turnId,
+  ).toBe(restarted.daemon.agentManager.getAgent(successorId)?.activeForegroundTurnId);
+  await activeSession!.complete();
+  await vi.waitFor(async () => {
+    await expect(client.inspectAgentSeatRotationPolicy(successorId)).resolves.toMatchObject({
+      phase: "blocked",
+      reason: "no_progress_immediate_retrigger",
+    });
+  });
+  expect(f.provider.preparationPrompts).toHaveLength(1);
+});
+
 const capabilities: AgentCapabilityFlags = {
   supportsStreaming: true,
   supportsSessionPersistence: true,
@@ -120,10 +308,11 @@ class ControlledClient implements AgentClient {
 
   constructor(
     private readonly checkpoint: { checkpointPath: string; repoPath: string; revision: string },
+    private readonly options: { earlySuccessorUsage?: boolean } = {},
   ) {}
 
   async createSession(config: AgentSessionConfig): Promise<AgentSession> {
-    const session = new ControlledSession(config, this);
+    const session = new ControlledSession(config, this, this.options);
     this.sessions.push(session);
     return session;
   }
@@ -179,6 +368,7 @@ class ControlledSession implements AgentSession {
   constructor(
     private readonly config: AgentSessionConfig,
     private readonly client: ControlledClient,
+    private readonly options: { earlySuccessorUsage?: boolean },
   ) {}
 
   async run(): Promise<AgentRunResult> {
@@ -194,12 +384,17 @@ class ControlledSession implements AgentSession {
       queueMicrotask(() => void this.complete());
     }
     if (typeof prompt === "string" && prompt.startsWith("Read the checkpoint")) {
+      if (this.options.earlySuccessorUsage) await this.emitUsage(41, 100);
       queueMicrotask(() => void this.complete());
     }
     return { turnId };
   }
 
-  async emitUsage(usedTokens: number, maxTokens: number): Promise<void> {
+  async emitUsage(
+    usedTokens: number,
+    maxTokens: number,
+    contextWindowSource: "provider-confirmed" | "catalog-fallback" = "provider-confirmed",
+  ): Promise<void> {
     if (!this.activeTurnId) throw new Error("no active turn");
     this.emit({
       type: "usage_updated",
@@ -209,7 +404,7 @@ class ControlledSession implements AgentSession {
           sessionId: this.id,
           turnId: this.activeTurnId,
           observedAt: new Date().toISOString(),
-          contextWindowSource: "provider-confirmed",
+          contextWindowSource,
           usedTokens,
           maxTokens,
         },
@@ -222,6 +417,10 @@ class ControlledSession implements AgentSession {
     const turnId = this.activeTurnId;
     this.activeTurnId = null;
     this.emit({ type: "turn_completed", provider: this.provider, turnId });
+  }
+
+  hasActiveTurn(): boolean {
+    return this.activeTurnId !== null;
   }
 
   subscribe(callback: (event: AgentStreamEvent) => void): () => void {
