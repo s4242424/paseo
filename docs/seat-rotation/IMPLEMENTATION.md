@@ -1,101 +1,126 @@
-# Seat rotation transition core
+# Seat rotation
 
-The reference core under `scripts/seat-rotation/` remains fixture proof. The
-daemon-owned operation is `packages/server/src/server/agent/native-seat-rotation.ts`.
-It has no watcher, schedule or automatic threshold policy.
+Seat rotation is a daemon-owned, receipt-backed handover for one logical seat.
+It is default-off. It is a candidate capability, not an installed or
+portfolio-wide rollout.
 
-## Client continuity
+The fixture reference core in `scripts/seat-rotation/` remains fixture-only
+proof. The supported operation is
+`packages/server/src/server/agent/native-seat-rotation.ts`; the threshold policy
+in `packages/server/src/server/agent/seat-rotation-policy.ts` only decides when
+to ask that operation to run. It does not own a second archive, fence, or
+successor path.
 
-The feature-gated client API is `DaemonClient.rotateAgentSeat`,
-`cancelAgentSeatRotation`, and `inspectAgentSeatRotation`. Persist the operation
-ID before asking for a rotation. On reconnect, call `inspectAgentSeatRotation`
-with that ID even when the predecessor is archived or no longer visible.
+## Enablement and seat binding
 
-Inspect returns a monotonic receipt `revision`, `phase`, `successorId`,
-`workspaceId`, `sourceRevision`, and safe `failureCode`. A `succeeded` phase
-means the successor is durable and can replace the predecessor tab; the app
-must wait for its normal agent snapshot before retargeting. `pending` and
-`failed` keep the predecessor target. The daemon, not the app, archives the
-predecessor. No labels, archive calls, checkpoint contents or provider session
-identifiers are client inputs to this continuity path.
+Native handover is available only when `enableNativeSeatRotation` is `true`.
+Automatic threshold preparation additionally requires
+`seatRotationPolicy.enabled: true`. With either setting absent or false, no new
+native rotation or policy latch starts.
 
-Native rotation is disabled unless `daemon.enableNativeSeatRotation` is true.
-The daemon advertises the capability only when that setting is enabled. The
-separate `inspectAgentSeatRotationPredecessor(predecessorId)` client method is
-for callers that retained the predecessor identity rather than an operation
-ID. Its snapshot links `operationId`, `phase`, `successorId`, `workspaceId`,
-`sourceRevision`, `revision`, and `failureCode`; it is not a replacement for
-the operation-ID receipt during an active transition.
+Each configured policy seat must have this exact shape:
 
-The daemon prepares and validates an idle successor before it archives the
-predecessor. Preparation failure leaves the predecessor live. After archive,
-the daemon rechecks the checkpoint and clean repository before it sends the
-resume prompt; a failed recheck closes the prepared successor without prompting
-it. Normal Stop latches the durable operation through the pre-journal window,
-so a queued different generation cannot hide that intent.
+```json
+{
+  "seatId": "build",
+  "repositoryPath": "/absolute/path/to/repository",
+  "handoverRoot": "/absolute/path/to/repository/.handover",
+  "checkpointPath": "/absolute/path/to/repository/.handover/CURRENT.json",
+  "progressWitnessPath": "/absolute/path/to/repository/.handover/progress.json",
+  "resumePrompt": "Read the checked handover and continue the bounded task.",
+  "goalContinuation": "checkpoint_only"
+}
+```
 
-## Contract
+The running agent must carry the matching `paseo.seat-id` label and have the
+same `cwd` as `repositoryPath`. One and only one live writer may match that
+logical seat. Two configured seats may not share a repository checkpoint. These
+checks intentionally refuse an ambiguous configuration instead of selecting a
+writer.
 
-`SeatRotationCore` accepts an injected backend with these operations:
+The checkpoint and witness belong to the repository's existing handover home;
+the daemon does not create a new portfolio registry or transcript store. The
+handover root and checkpoint are resolved as real paths. The checkpoint must be
+a regular, non-symlink file below that root.
 
-1. `preflight` establishes the exact predecessor session, repository, source
-   revision, runtime configuration, no writers/permissions/children/external
-   operations/queued goal writers, and positive restart capacity.
-2. `createPreparedSuccessor` accepts the operation ID as its idempotency key.
-   It must create a non-writer successor.
-3. `readSuccessorReadiness` proves a distinct session has read the checkpoint
-   and has the exact repository, source revision, checkpoint hash and runtime.
-4. `fencePredecessor` must establish an atomic writer fence. A read-idle result
-   followed by archive is not an implementation of this operation.
-5. `archivePredecessor` confirms the fenced predecessor's closure/archive.
-   Uncertain closure does not activate the successor.
-6. `activateSuccessor` must return established liveness only after verified old
-   closure. Unknown liveness does not activate the transition.
-7. `reconcile` reads an uncertain operation; the core never blind-recreates it.
+## Checkpoint, boundary, and policy
 
-The checkpoint is an existing regular file below an existing non-symlink
-handover root. Its SHA-256, operation ID, generation, session, canonical repo
-path and source revision must match the request. It carries only an opaque next
-action string; command and shell checkpoint fields are refused and nothing from
-the checkpoint is executed.
+The preparation turn writes a JSON envelope containing `operationId`,
+`generation`, `sessionId`, `repoPath`, `sourceRevision`,
+`dirtyDisposition: "clean"`, and an opaque `nextAction`. The daemon seals the
+final `timelineRevision` after that turn completes. It then validates the
+envelope, repository identity and clean disposition again before it archives the
+predecessor or sends the explicit `resumePrompt`. Checkpoint text is data: it is
+never executed as a command or shell input.
 
-Operations use a durable real-filesystem JSON journal plus a per-predecessor
-generation mkdir admission lock. The temporary file is fsynced before rename
-and the containing directory is fsynced after rename. A second operation ID
-for the same predecessor generation is refused. Create, readiness, fence,
-activation and archive uncertainty retain recoverable journal state. Stop is a
-durable latch: after fencing it interrupts or closes the successor and retains
-a recoverable idle state rather than silently continuing.
+The policy latches only a finite, fresh, provider-confirmed context observation
+for the live provider session and active turn where `used / limit > 0.4`.
+Exactly 40% does not latch. A latch waits for an idle, permission-free boundary;
+user work that changes that boundary blocks it. The witness file must exist and
+change after a successor handover before a high-usage successor can rotate
+again. A missing or unchanged witness blocks the operation with a recorded
+reason, leaving the successor available rather than making a no-progress chain.
 
-Usage samples must be finite, fresh, session-matching occupancy values. The
-strict condition is `used / limit > 0.4`; exactly 40% does not latch. Latches
-are scoped to seat, successor generation and successor session. An above-40%
-fresh successor sample with zero recorded completed actions marks the operation
-`blocked` as `no_progress_immediate_retrigger`; it does not create another seat
-and leaves the prepared/activated successor available. Old-seat telemetry is
-inactive. This does not change context settings or repository instructions.
+The policy's durable journal records intent and preparation state. The native
+receipt remains the authority for admission, atomic writer fencing, predecessor
+archive, successor activation and cancellation. A normal operator Stop latches
+the operation through the pre-journal window, cancels a prepared successor when
+needed, and prevents a later queued generation from concealing that intent.
+
+Native provider goals do not transfer. `goalContinuation` is always
+`"checkpoint_only"`: put the next action in the repository checkpoint and use a
+new explicit prompt. Pending permissions, active writers, child writes,
+unfinished external work, a dirty checkpoint, malformed receipts, or uncertain
+closure fail closed.
+
+## Manual continuity and reconnect
+
+The manual path has the same safety contract as the policy: create the
+repository checkpoint at a safe boundary, retain an operation ID, then call
+`DaemonClient.rotateAgentSeat` with the matching predecessor, generation,
+handover root, checkpoint and explicit resume prompt. It is not safe to replace
+this with a direct archive/create sequence.
+
+Persist the operation ID before requesting rotation. On reconnect, call
+`inspectAgentSeatRotation(operationId)` even if the predecessor is archived or
+not visible. Its monotonic receipt includes `revision`, `phase`, `successorId`,
+`workspaceId`, `sourceRevision`, and a safe `failureCode`. Only `succeeded`
+permits the app to retarget after the normal successor snapshot arrives;
+`pending` and `failed` keep the predecessor target. A caller that retained only
+the old ID can use `inspectAgentSeatRotationByPredecessor(predecessorId)` to
+find the linked receipt, but it does not replace the operation-ID receipt during
+an active transition.
+
+The daemon archives the predecessor. Timeline rows and the durable receipt seal
+the transition; old native history remains separate and is not injected into the
+successor context.
+
+Rotation and cancellation require the daemon's existing `workspace.write`
+permission. Inspection requires `workspace.read`. These are daemon-wide
+capabilities, not new per-agent resource grants; authenticated restricted-client
+network qualification remains unproved.
+
+## Rollback and limits
+
+To stop future policy-triggered handovers, set `seatRotationPolicy.enabled` to
+`false`; to stop new native requests too, set `enableNativeSeatRotation` to
+`false`. In this candidate version, durable native admission lookup stays
+installed so existing receipts and writer fences remain effective while new
+rotation is disabled. Do not treat a downgrade to an older binary as safe:
+first resolve every pending handover and explicitly account for archived writers.
+
+No shared daemon, port 6767, mobile application, account, or production setting
+is changed by this capability or its tests. Deterministic and in-process daemon
+tests prove bounded contracts only. The recorded actual-provider work did not
+complete three consecutive Fable handovers, did not run Codex handovers, and did
+not prove final live cleanup. Provider, host, version, browser, and rollout
+coverage must therefore be reported from the exact later evidence rather than
+inferred from these receipts.
 
 ## Evidence
 
-Fixture proof uses the real filesystem and an injected deterministic backend;
-it does not prove installed Paseo lifecycle behaviour or the backend's atomic
-writer fence. Serena and Context7 were unavailable in this environment; no Go
-files changed, so gopls is not applicable. The native audit at
-`.arch/receipts/seat-rotation-20260919/adapter-design/REPORT.md` confirms that
-installed 0.8.0 cannot provide the required fence externally: production reuse
-belongs in the daemon-owned receipt-backed rotate operation, not this script.
-
-| Command                                                                                                                           | Exit | Result                                                                                                                                      |
-| --------------------------------------------------------------------------------------------------------------------------------- | ---: | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `node --test scripts/seat-rotation/core.test.mjs` before `core.mjs` existed                                                       |    1 | RED: missing module                                                                                                                         |
-| `node --test --test-reporter=spec scripts/seat-rotation/core.test.mjs`                                                            |    0 | 10 targeted deterministic fixture cases passed                                                                                              |
-| `node --check scripts/seat-rotation/core.mjs`                                                                                     |    0 | Applicable type/syntax check for stdlib `.mjs`                                                                                              |
-| `npm run format:files -- scripts/seat-rotation/core.mjs scripts/seat-rotation/core.test.mjs docs/seat-rotation/IMPLEMENTATION.md` |    0 | Required formatter                                                                                                                          |
-| `npm run lint -- scripts/seat-rotation/core.mjs scripts/seat-rotation/core.test.mjs`                                              |    0 | Targeted lint; two documented complexity suppressions retain explicit ordered failure states                                                |
-| `npm run typecheck` via repository pre-commit                                                                                     |    2 | Existing Expo base declaration absence and unrelated plugin/CLI type incompatibilities; stdlib `.mjs` has no TypeScript compilation surface |
-| `semgrep --config auto scripts/seat-rotation`                                                                                     |    0 | 200 rules, 2 relevant JS targets, 0 findings                                                                                                |
-| `gitleaks detect --no-git --source scripts/seat-rotation --verbose`                                                               |    0 | 30,457 bytes scanned, 0 leaks                                                                                                               |
-| `npx vitest run packages/server/src/server/agent/native-seat-rotation.actual.e2e.test.ts --bail=1`                                |    0 | 10 in-process daemon cases: restart receipts, cancellation, admission races, default-off, permission and managed-child refusal              |
-
-`package-lock.json` was unchanged before implementation; final dependency
-evidence is recorded with the verification run.
+The Phase 1 candidate retains focused native, policy, permission, telemetry and
+opt-in live-harness coverage. Real-provider files use the explicit opt-in test
+category and are not run as ordinary local gates. See the integration proof
+report for exact commands, exits, scan coverage and the remaining Phase 2 UI and
+live-provider evidence.
