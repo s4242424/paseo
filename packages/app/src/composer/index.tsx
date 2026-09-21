@@ -42,6 +42,7 @@ import {
   type DraftAgentControlsProps,
 } from "@/composer/agent-controls";
 import { ContextWindowMeter } from "@/components/context-window-meter";
+import { isClaudeContextIdentity } from "@/components/context-window-meter.utils";
 import { KeyboardTranslateView } from "@/components/keyboard-translate-view";
 import { useImageAttachmentPicker } from "@/hooks/use-image-attachment-picker";
 import { selectAgentTurnPresentation, useSessionStore } from "@/stores/session-store";
@@ -264,6 +265,13 @@ function buildAgentStateSelector(serverId: string, agentId: string) {
       contextWindowUsedTokens: agent?.lastUsage?.contextWindowUsedTokens ?? null,
       totalCostUsd: agent?.lastUsage?.totalCostUsd ?? null,
       model: agent?.model ?? null,
+      isClaudeContext: agent
+        ? isClaudeContextIdentity({
+            provider: agent.provider,
+            model: agent.model,
+            runtimeModel: agent.runtimeInfo?.model,
+          })
+        : false,
     };
   };
 }
@@ -278,6 +286,7 @@ function renderContextWindowMeter(
   agentId: string,
   pending: boolean,
   glyphSize: number,
+  isClaude: boolean,
 ): ReactElement | null {
   const hasData = contextWindowMaxTokens !== null && contextWindowUsedTokens !== null;
   if (!hasData && !pending) {
@@ -294,6 +303,7 @@ function renderContextWindowMeter(
       agentId={agentId}
       pending={pending}
       glyphSize={glyphSize}
+      isClaude={isClaude}
     />
   );
 }
@@ -2005,6 +2015,7 @@ function ComposerContentImpl({
         agentId,
         contextWindowPending,
         contextWindowMeterGlyphSize,
+        agentState.isClaudeContext,
       ),
     [
       contextWindowMaxTokens,
@@ -2015,6 +2026,7 @@ function ComposerContentImpl({
       agentId,
       contextWindowPending,
       contextWindowMeterGlyphSize,
+      agentState.isClaudeContext,
     ],
   );
   const beforeVoiceContent = useMemo(

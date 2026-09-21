@@ -6,7 +6,7 @@ import { useTranslation } from "react-i18next";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ProviderUsageTooltipSection } from "@/provider-usage/tooltip-section";
 import { useProviderUsage } from "@/provider-usage/use-provider-usage";
-import { formatTokenCount } from "./context-window-meter.utils";
+import { formatTokenCount, getContextMeterSeverity } from "./context-window-meter.utils";
 
 interface ContextWindowMeterProps {
   maxTokens: number | null;
@@ -20,6 +20,8 @@ interface ContextWindowMeterProps {
   pending?: boolean;
   /** Optional glyph envelope for icon-toolbar alignment. */
   glyphSize?: number;
+  /** Claude runtime identity selects the earlier 40%/50% colour thresholds. */
+  isClaude?: boolean;
 }
 
 const SVG_SIZE = 14;
@@ -62,12 +64,14 @@ function formatSessionCost(value: number): string | null {
 function getMeterColors(
   percentage: number,
   theme: ReturnType<typeof useUnistyles>["theme"],
+  isClaude: boolean,
 ): { progress: string; track: string } {
   const track = theme.colors.surface3;
-  if (percentage > 90) {
+  const severity = getContextMeterSeverity(percentage, isClaude);
+  if (severity === "critical") {
     return { progress: theme.colors.destructive, track };
   }
-  if (percentage >= 70) {
+  if (severity === "warning") {
     return { progress: theme.colors.palette.amber[500], track };
   }
   return { progress: theme.colors.foregroundMuted, track };
@@ -106,6 +110,7 @@ export function ContextWindowMeter({
   agentId,
   pending = false,
   glyphSize,
+  isClaude = false,
 }: ContextWindowMeterProps) {
   const { theme } = useUnistyles();
   const { t } = useTranslation();
@@ -163,7 +168,7 @@ export function ContextWindowMeter({
   const roundedPercentage = Math.round(percentage);
   const { svgSize, center, radius, strokeWidth, circumference, containerStyle } = geometry;
   const dashOffset = circumference - (clampedPercentage / 100) * circumference;
-  const colors = getMeterColors(clampedPercentage, theme);
+  const colors = getMeterColors(clampedPercentage, theme, isClaude);
   const formattedSessionCost =
     typeof totalCostUsd === "number" ? formatSessionCost(totalCostUsd) : null;
 
