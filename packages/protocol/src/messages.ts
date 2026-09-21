@@ -214,6 +214,29 @@ export const AgentSkillSelectionSchema = z.discriminatedUnion("mode", [
 ]);
 export type AgentSkillSelection = z.infer<typeof AgentSkillSelectionSchema>;
 
+// Additive, non-Git canonical-continuity source. Default remains "git" so an
+// existing seat config is byte-identical in behaviour: a Git command failure
+// must never fall back to this weaker-sounding but differently-scoped mode.
+// The owner explicitly lists the exact canonical files for a "files" source;
+// Paseo never infers canon from prose or scans the repository for candidates.
+const SeatRotationGitSourceSchema = z.object({ kind: z.literal("git") }).strict();
+const SeatRotationFilesSourceSchema = z
+  .object({
+    kind: z.literal("files"),
+    // Bumped by the owner whenever the manifest's file set changes shape, so a
+    // stale successor cannot silently revalidate against a renamed manifest.
+    manifestVersion: z.number().int().positive(),
+    // Repository-relative paths only; absolute paths and ".." segments are
+    // refused at validation time, not here, so the reason is always specific.
+    paths: z.array(z.string().min(1)).min(1).max(500),
+  })
+  .strict();
+export const SeatRotationSourceSchema = z.discriminatedUnion("kind", [
+  SeatRotationGitSourceSchema,
+  SeatRotationFilesSourceSchema,
+]);
+export type SeatRotationSource = z.infer<typeof SeatRotationSourceSchema>;
+
 const SeatRotationPolicySeatSchema = z
   .object({
     seatId: z.string().min(1),
@@ -224,6 +247,8 @@ const SeatRotationPolicySeatSchema = z
     resumePrompt: z.string().min(1),
     // Native rotation resumes an explicit prompt; it cannot transfer provider goals.
     goalContinuation: z.literal("checkpoint_only"),
+    // Omitted seats keep today's Git-only behaviour exactly.
+    source: SeatRotationSourceSchema.default({ kind: "git" }),
   })
   .strict();
 

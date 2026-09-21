@@ -68,12 +68,79 @@ a regular, non-symlink file below that root. Preserve the repository's canonical
 checkpoint owner and update protocol; configuration does not authorise a caller
 to overwrite that file blindly.
 
-Supported scope is a Git-backed workspace. Native validation runs `git -C
-<repository> rev-parse HEAD` and a porcelain status check before the archive,
-then checks the recorded source revision and clean disposition again after it.
-A non-Git conversation root, including Escape's conversation root, is
-unsupported. Do not initialise Git, change the root, or create a covert
-repository merely to make it eligible.
+Default scope is a Git-backed workspace: an omitted `source` on a seat entry
+means `{ "kind": "git" }`, and native validation runs `git -C <repository>
+rev-parse HEAD` and a porcelain status check before the archive, then checks
+the recorded source revision and clean disposition again after it. Do not
+initialise Git, change the root, or create a covert repository merely to make
+a workspace eligible for the Git source.
+
+A conversation root with no Git repository, including Escape's conversation
+root, can opt in to a `"files"` source instead. The owner adds an explicit
+`source` block to that seat's daemon config entry:
+
+```json
+{
+  "seatId": "escape-build",
+  "repositoryPath": "/absolute/path/to/conversation/root",
+  "handoverRoot": "/absolute/path/to/conversation/root/.handover",
+  "checkpointPath": "/absolute/path/to/conversation/root/.handover/CURRENT.json",
+  "progressWitnessPath": "/absolute/path/to/conversation/root/.handover/progress.json",
+  "resumePrompt": "Read the checked handover and continue the bounded task.",
+  "goalContinuation": "checkpoint_only",
+  "source": {
+    "kind": "files",
+    "manifestVersion": 1,
+    "paths": ["CANON.md", "state/ledger.json"]
+  }
+}
+```
+
+`paths` is the owner's exact, explicit, repository-relative canonical-file
+list; Paseo never infers it from `AGENTS.md`/`CLAUDE.md` prose, never scans the
+conversation root for candidates, and a checkpoint author cannot shrink or
+change that boundary by editing the checkpoint (the source strategy is read
+from this trusted daemon config, never from the checkpoint file). Bump
+`manifestVersion` whenever the file set's shape changes.
+
+Native validation for a `"files"` source reads every manifest file, refuses a
+missing file, a non-regular-file entry (directory, symlink, device, and so
+on), a path that escapes the repository root or repeats an already-listed
+path, and a manifest that names the checkpoint file itself. It re-stats every
+entry after every file in the manifest has been read and refuses the
+operation if any entry changed size or modification time in that window,
+fail-closed against a concurrent write or torn snapshot. The same
+`paths`/`manifestVersion` are revalidated at the same pre-archive and
+post-fence boundary points the Git source already used; nothing about that
+call sequence changed. Entry count is bounded at 500 files and combined bytes
+at 10 MiB — both refusals, not silent truncation.
+
+For a `"files"` source, `sourceRevision` in the checkpoint envelope is a
+SHA-256 digest over the manifest version, the sorted relative paths, and each
+file's length and bytes; it is not a Git commit hash, but it fits the same
+hex-string checkpoint field and durable-receipt field used by the Git source.
+The daemon separately hashes the checkpoint file itself as `checkpointHash`,
+so the manifest digest never covers the checkpoint's own bytes. The durable
+receipt additionally records `sourceKind` (`"git"` or `"files"`) and, for a
+files source, `manifestVersion` and `manifestDigest`. A receipt written before
+this field existed has no `sourceKind` on disk; it is read back as `"git"`,
+never reinterpreted as an unconfigured `"files"` source. A Git command
+failure never falls back to the files strategy, and a files-source failure
+never falls back to Git: each is a distinct, explicitly-configured path.
+
+`dirtyDisposition: "clean"` means different things per source kind. For
+`"git"` it asserts the whole repository worktree is clean. For `"files"` it
+asserts only that the owner-configured manifest files matched their declared
+canonical state at the moment of the checkpoint; it is not a claim that the
+rest of the conversation root, or any file outside the manifest, is clean or
+protected. The canonical checkpoint owner remains responsible for keeping
+that boundary meaningful; the daemon verifies bytes, it does not fabricate a
+semantic handover.
+
+This capability adds no task database, registry, or filesystem watcher/poller.
+Manifest edits are governed by the same permission that owns
+`$PASEO_HOME/config.json` today (see Enablement and seat binding above); there
+is no separate manifest-editing surface.
 
 ## Checkpoint, boundary, and policy
 

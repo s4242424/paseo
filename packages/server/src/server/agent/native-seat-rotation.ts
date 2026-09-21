@@ -5,10 +5,17 @@ import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
 import { z } from "zod";
 import { PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
+import type { SeatRotationSource } from "@getpaseo/protocol/messages";
 import type { AgentManager, ManagedAgent } from "./agent-manager.js";
 import type { AgentStorage } from "./agent-storage.js";
 
 const execFile = promisify(execFileCallback);
+
+/** Owner-configured bound: refuses an oversized or unbounded non-Git manifest. */
+const MAX_FILES_MANIFEST_ENTRIES = 500;
+/** Owner-configured bound: refuses a manifest whose combined bytes are unbounded. */
+const MAX_FILES_MANIFEST_BYTES = 10 * 1024 * 1024;
+const DEFAULT_SOURCE: SeatRotationSource = { kind: "git" };
 
 const CheckpointSchema = z.object({
   operationId: z.string().uuid(),
@@ -18,6 +25,10 @@ const CheckpointSchema = z.object({
   sourceRevision: z.string().regex(/^[a-f0-9]{7,64}$/i),
   /** Last committed predecessor timeline sequence when this checkpoint was made. */
   timelineRevision: z.number().int().nonnegative(),
+  // For a "git" source this asserts the whole repository worktree is clean.
+  // For a "files" source it asserts only that the owner-configured manifest
+  // files matched their declared canonical state; it is not a claim about the
+  // rest of the repository or conversation root.
   dirtyDisposition: z.literal("clean"),
   nextAction: z.string().min(1),
 });
@@ -36,6 +47,15 @@ const JournalSchema = z.object({
   checkpointHash: z.string().regex(/^[a-f0-9]{64}$/),
   workspaceId: z.string().nullable(),
   sourceRevision: z.string().regex(/^[a-f0-9]{7,64}$/i),
+  // Missing on an old journal record means "git": that is the only kind that
+  // ever existed before this field, and a default here must never let an old
+  // Git receipt be reinterpreted as a weaker, unconfigured non-Git source.
+  sourceKind: z.enum(["git", "files"]).default("git"),
+  manifestVersion: z.number().int().positive().optional(),
+  manifestDigest: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/)
+    .optional(),
   revision: z.number().int().nonnegative(),
   state: z.enum([
     "requested",
@@ -66,6 +86,14 @@ export interface NativeSeatRotationRequest {
   checkpointPath: string;
   /** The checkpoint's nextAction is carried as data; only this explicit input is sent to a provider. */
   resumePrompt: string;
+  /**
+   * Owner-authorised source strategy for this seat. Absent means "git", the
+   * only behaviour that existed before this field. This must come from
+   * trusted daemon seat configuration, never from the checkpoint file itself:
+   * a checkpoint author must not be able to unilaterally select a weaker
+   * validation boundary for their own rotation.
+   */
+  source?: SeatRotationSource;
 }
 
 export interface NativeSeatRotationResult {
@@ -185,6 +213,7 @@ export class NativeSeatRotationService {
     if (!predecessor || predecessor.lifecycle === "closed") {
       throw new Error("rotation predecessor is not a live session");
     }
+    const source = request.source ?? DEFAULT_SOURCE;
     const checkpoint = await this.validateCheckpoint(request, predecessor);
     await this.claimGeneration(request);
 
@@ -199,6 +228,9 @@ export class NativeSeatRotationService {
       checkpointHash: checkpoint.checkpointHash,
       workspaceId: predecessor.workspaceId ?? null,
       sourceRevision: checkpoint.checkpoint.sourceRevision,
+      sourceKind: source.kind,
+      manifestVersion: source.kind === "files" ? source.manifestVersion : undefined,
+      manifestDigest: source.kind === "files" ? checkpoint.checkpoint.sourceRevision : undefined,
       revision: 0,
       state: "requested",
       updatedAt: new Date().toISOString(),
@@ -553,7 +585,11 @@ export class NativeSeatRotationService {
     if (checkpoint.timelineRevision !== timelineRevision) {
       throw new Error("checkpoint conversation boundary no longer matches the predecessor");
     }
-    const snapshot = await readCleanGitSnapshot(repoPath, checkpointPath);
+    const snapshot = await readCleanSourceSnapshot(
+      repoPath,
+      checkpointPath,
+      request.source ?? DEFAULT_SOURCE,
+    );
     if (snapshot.sourceRevision !== checkpoint.sourceRevision) {
       throw new Error("checkpoint source revision no longer matches the repository");
     }
@@ -618,7 +654,11 @@ export class NativeSeatRotationService {
     const raw = await fs.readFile(checkpointPath);
     const checkpointHash = createHash("sha256").update(raw).digest("hex");
     const checkpoint = CheckpointSchema.parse(JSON.parse(raw.toString("utf8")));
-    const snapshot = await readCleanGitSnapshot(repoPath, checkpointPath);
+    const snapshot = await readCleanSourceSnapshot(
+      repoPath,
+      checkpointPath,
+      request.source ?? DEFAULT_SOURCE,
+    );
     if (snapshot.sourceRevision !== checkpoint.sourceRevision) {
       throw new Error("checkpoint source revision no longer matches the repository");
     }
@@ -840,6 +880,114 @@ export class NativeSeatRotationService {
       `${predecessorId}.${generation}.lock`,
     );
   }
+}
+
+/**
+ * A Git command failure must never fall through to the files strategy: each
+ * source kind is a distinct, explicitly-requested validation path, not a
+ * fallback chain.
+ */
+async function readCleanSourceSnapshot(
+  repoPath: string,
+  checkpointPath: string,
+  source: SeatRotationSource,
+): Promise<{ sourceRevision: string }> {
+  if (source.kind === "files")
+    return await readCleanFilesSnapshot(repoPath, checkpointPath, source);
+  return await readCleanGitSnapshot(repoPath, checkpointPath);
+}
+
+/**
+ * Non-Git canonical-continuity snapshot. The manifest is the owner's explicit,
+ * daemon-config-authorised file list (never inferred, never scanned, never
+ * shrinkable by the checkpoint caller). Every entry is read, bounded, and
+ * proven not to be a symlink, directory, duplicate, or the checkpoint file
+ * itself, then re-verified unchanged after the read to refuse a torn/racing
+ * snapshot. The digest is a declared-boundary seal: it proves the manifest
+ * bytes and file set identity, not that the rest of the directory is clean.
+ */
+export async function readCleanFilesSnapshot(
+  repoPath: string,
+  checkpointPath: string,
+  source: Extract<SeatRotationSource, { kind: "files" }>,
+): Promise<{ sourceRevision: string }> {
+  if (source.paths.length > MAX_FILES_MANIFEST_ENTRIES) {
+    throw new Error("non-Git checkpoint manifest exceeds the configured entry bound");
+  }
+  const checkpointRelative = path.relative(repoPath, checkpointPath);
+  const normalised = source.paths.map((entry) => path.normalize(entry));
+  const seen = new Set<string>();
+  for (const relative of normalised) {
+    if (path.isAbsolute(relative) || relative === "" || relative.split(path.sep).includes("..")) {
+      throw new Error(`non-Git checkpoint manifest entry escapes the repository: ${relative}`);
+    }
+    if (relative === checkpointRelative) {
+      throw new Error("non-Git checkpoint manifest must not include the checkpoint file itself");
+    }
+    if (seen.has(relative)) {
+      throw new Error(`non-Git checkpoint manifest has a duplicate path: ${relative}`);
+    }
+    seen.add(relative);
+  }
+  const sorted = [...seen].sort();
+
+  const preStats = new Map<string, { size: number; mtimeMs: number }>();
+  let totalBytes = 0;
+  const files = new Map<string, Buffer>();
+  for (const relative of sorted) {
+    const resolved = path.resolve(repoPath, relative);
+    requireWithin(
+      repoPath,
+      resolved,
+      `non-Git checkpoint manifest entry is outside the repository: ${relative}`,
+    );
+    let before: import("node:fs").Stats;
+    try {
+      await refuseSymlinks(resolved);
+      before = await fs.lstat(resolved);
+    } catch (error) {
+      if (isNotFound(error)) {
+        throw new Error(`non-Git checkpoint manifest file is missing: ${relative}`, {
+          cause: error,
+        });
+      }
+      throw error;
+    }
+    if (!before.isFile()) {
+      throw new Error(`non-Git checkpoint manifest entry is not a regular file: ${relative}`);
+    }
+    totalBytes += before.size;
+    if (totalBytes > MAX_FILES_MANIFEST_BYTES) {
+      throw new Error("non-Git checkpoint manifest exceeds the configured byte bound");
+    }
+    preStats.set(relative, { size: before.size, mtimeMs: before.mtimeMs });
+    files.set(relative, await fs.readFile(resolved));
+  }
+  // Fail closed if a manifest file changed while it, or a sibling entry, was
+  // being read: re-stat every entry only after every read has completed.
+  for (const relative of sorted) {
+    const resolved = path.resolve(repoPath, relative);
+    const after = await fs.lstat(resolved);
+    const before = preStats.get(relative)!;
+    if (
+      after.isSymbolicLink() ||
+      !after.isFile() ||
+      after.size !== before.size ||
+      after.mtimeMs !== before.mtimeMs
+    ) {
+      throw new Error(`non-Git checkpoint source changed during read: ${relative}`);
+    }
+  }
+
+  const hash = createHash("sha256");
+  hash.update(JSON.stringify({ version: source.manifestVersion, kind: "files", paths: sorted }));
+  for (const relative of sorted) {
+    const bytes = files.get(relative)!;
+    hash.update(relative);
+    hash.update(String(bytes.length));
+    hash.update(bytes);
+  }
+  return { sourceRevision: hash.digest("hex") };
 }
 
 async function readCleanGitSnapshot(

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import type { SeatRotationPolicyConfig } from "@getpaseo/protocol/messages";
+import type { SeatRotationPolicyConfig, SeatRotationSource } from "@getpaseo/protocol/messages";
 import type { AgentManager, AgentManagerEvent, ManagedAgent } from "./agent-manager.js";
 import type {
   NativeSeatRotationRequest,
@@ -49,6 +49,7 @@ interface SeatConfig {
   progressWitnessPath: string;
   resumePrompt: string;
   goalContinuation: "checkpoint_only";
+  source: SeatRotationSource;
 }
 
 export interface SeatRotationPolicyClientState {
@@ -403,6 +404,7 @@ export class SeatRotationPolicy {
       handoverRoot: seat.handoverRoot,
       checkpointPath: seat.checkpointPath,
       resumePrompt: seat.resumePrompt,
+      source: seat.source,
     };
     try {
       const result = await this.options.nativeSeatRotation.rotate(request);
