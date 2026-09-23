@@ -1,4 +1,4 @@
-import { describe, expect, test, beforeEach, afterEach } from "vitest";
+import { describe, expect, test, beforeEach, afterEach, vi } from "vitest";
 import os from "node:os";
 import path from "node:path";
 import { mkdtempSync, readdirSync, rmSync } from "node:fs";
@@ -297,6 +297,67 @@ describe("AgentStorage", () => {
 
     const recordAfterSnapshot = await storage.get(agentId);
     expect(recordAfterSnapshot?.archivedAt).toBe(archivedAt);
+  });
+
+  test("retired records refuse deletion and retain their fence after fresh storage", async () => {
+    const agentId = "retired-delete";
+    await storage.applySnapshot(createManagedAgent({ id: agentId, lifecycle: "idle" }));
+    const retirement = {
+      operationId: "delete-op",
+      reason: "retain fence",
+      retiredAt: "2025-01-05T00:00:00.000Z",
+    };
+    await storage.markRetired(agentId, retirement);
+    await expect(storage.remove(agentId)).rejects.toThrow("retired");
+    expect(() => storage.beginDelete(agentId)).toThrow("retired");
+    expect((await storage.get(agentId))?.retirement).toEqual(retirement);
+    const fresh = new AgentStorage(storagePath, logger);
+    fresh.beginDelete(agentId);
+    await expect(fresh.remove(agentId)).rejects.toThrow("retired");
+    expect((await fresh.get(agentId))?.retirement).toEqual(retirement);
+    await fresh.setTitle(agentId, "still writable");
+    expect((await fresh.get(agentId))?.title).toBe("still writable");
+  });
+
+  test("a retirement write already in flight wins over deletion", async () => {
+    const agentId = "retirement-delete-race";
+    await storage.applySnapshot(createManagedAgent({ id: agentId, lifecycle: "idle" }));
+    let release!: () => void;
+    let started!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const writing = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const rename = fs.rename.bind(fs);
+    const spy = vi.spyOn(fs, "rename").mockImplementationOnce(async (...args) => {
+      started();
+      await gate;
+      return rename(...args);
+    });
+    const retirement = {
+      operationId: "race-op",
+      reason: "race",
+      retiredAt: "2025-01-05T00:00:00.000Z",
+    };
+    try {
+      const retiring = storage.markRetired(agentId, retirement);
+      await writing;
+      const removing = storage.remove(agentId);
+      const rejected = expect(removing).rejects.toThrow("retired");
+      release();
+      await retiring;
+      await rejected;
+      expect((await new AgentStorage(storagePath, logger).get(agentId))?.retirement).toEqual(
+        retirement,
+      );
+      await storage.setTitle(agentId, "fence retained");
+      expect((await storage.get(agentId))?.title).toBe("fence retained");
+    } finally {
+      release();
+      spy.mockRestore();
+    }
   });
 
   test("markRetired persists an immutable fence and is idempotent for the same operation", async () => {

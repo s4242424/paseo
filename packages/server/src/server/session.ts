@@ -3150,10 +3150,12 @@ export class Session {
   private async handleDeleteAgentRequest(agentId: string, requestId: string): Promise<void> {
     this.sessionLogger.info({ agentId }, `Deleting agent ${agentId} from registry`);
 
+    const stored = await this.agentStorage.get(agentId);
+    if (stored?.retirement) {
+      throw new AgentRetiredError(agentId);
+    }
     const knownWorkspaceId =
-      this.agentManager.getAgent(agentId)?.workspaceId ??
-      (await this.agentStorage.get(agentId))?.workspaceId ??
-      null;
+      this.agentManager.getAgent(agentId)?.workspaceId ?? stored?.workspaceId ?? null;
 
     // File-backed storage still needs an early delete fence before closeAgent().
     beginAgentDeleteIfSupported(this.agentStorage, agentId);
@@ -3176,6 +3178,7 @@ export class Session {
       await this.agentManager.deleteAgentState(agentId);
     } catch (error) {
       this.sessionLogger.error({ err: error, agentId }, `Failed to fully delete agent ${agentId}`);
+      throw error;
     }
 
     this.emit({
@@ -4881,8 +4884,13 @@ export class Session {
     const agentIds = Array.isArray(agentId) ? agentId : [agentId];
 
     try {
+      const eligibleIds = (
+        await Promise.all(
+          agentIds.map(async (id) => ((await this.agentStorage.get(id))?.retirement ? null : id)),
+        )
+      ).filter((id): id is string => id !== null);
       await Promise.all(
-        agentIds.map((id) =>
+        eligibleIds.map((id) =>
           ensureAgentLoaded(id, {
             agentManager: this.agentManager,
             agentStorage: this.agentStorage,
@@ -4890,11 +4898,11 @@ export class Session {
           }),
         ),
       );
-      await Promise.all(agentIds.map((id) => this.agentManager.clearAgentAttention(id)));
+      await Promise.all(eligibleIds.map((id) => this.agentManager.clearAgentAttention(id)));
       if (requestId) {
         const agents = (
           await Promise.all(
-            agentIds.map(async (id) => {
+            eligibleIds.map(async (id) => {
               const agent = this.agentManager.getAgent(id);
               return agent ? this.buildAgentPayload(agent) : null;
             }),

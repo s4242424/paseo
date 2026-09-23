@@ -66,17 +66,7 @@ export async function ensureAgentLoaded(
   agentId: string,
   deps: EnsureAgentLoadedDeps,
 ): Promise<ManagedAgent> {
-  // Checked before every fast path below, including "already live" and
-  // "already in flight": a retirement whose close attempt failed leaves the
-  // agent live in memory, and returning that stale snapshot here would
-  // silently hand back a resumable-looking agent for a fenced one. This is a
-  // synchronous, process-lifetime cache — never cleared once set — so it
-  // catches that case even though it isn't a fresh storage read. There is no
-  // read-only exception here: this function always resumes through the
-  // provider, and a resume "purpose" hint is not honored by every provider
-  // (only Codex's resumeSession actually branches on it — see
-  // agent-manager.ts's fetchRetiredAgentTimeline for the real read-only
-  // path, which never calls a provider at all).
+  // A failed close can leave a retired agent live; never return it from fast paths.
   const rejectIfRetired = (): void => {
     if (deps.agentManager.isAgentRetired(agentId)) {
       throw new AgentRetiredError(agentId);
@@ -86,10 +76,7 @@ export async function ensureAgentLoaded(
   rejectIfRetired();
 
   await deps.agentManager.waitForAgentClose?.(agentId);
-  // A retirement can complete during the await above — persisting the fence
-  // and populating the cache — right before the fast paths below would
-  // otherwise hand back a stale live snapshot left over from a failed close.
-  // Re-check immediately after the barrier, before either fast return.
+  // Retirement may have completed while waiting for close.
   rejectIfRetired();
 
   const inflight = pendingAgentInitializations.get(agentId);
@@ -124,10 +111,6 @@ export async function ensureAgentLoaded(
       throw new Error(`Agent not found: ${agentId}`);
     }
     if (record.retirement) {
-      // The durable fence blocks every interactive entry that resumes or
-      // creates a runtime, both live and stored-only, across restarts and
-      // concurrent requests: they all funnel through this storage read
-      // before any provider work starts.
       throw new AgentRetiredError(agentId);
     }
 

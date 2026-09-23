@@ -1231,6 +1231,91 @@ test("a legacy socket cannot borrow a modern sibling's directory observation", a
   }
 });
 
+test("retired deletion returns an error and mixed attention batches still complete", async () => {
+  const daemon = await createTestPaseoDaemon({ mcpEnabled: false });
+  const admin = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws` });
+  let peer: SubscriptionPeer | undefined;
+  try {
+    await admin.connect();
+    const retired = await admin.createAgent({ provider: "codex", cwd: daemon.staticDir });
+    const ordinary = await admin.createAgent({ provider: "codex", cwd: daemon.staticDir });
+    const handle = daemon.daemon.agentManager.getAgent(retired.id)?.persistence;
+    expect(handle).toBeTruthy();
+    peer = await SubscriptionPeer.connect(daemon.port, "retirement-mutations");
+    await peer.request({
+      type: "agent.retire.request",
+      requestId: "retire",
+      agentId: retired.id,
+      reason: "test",
+      operationId: "mutation-test",
+    });
+    expect(peer.frames).toContainEqual(
+      expect.objectContaining({
+        message: expect.objectContaining({ type: "agent.retire.response" }),
+      }),
+    );
+    await peer.request({
+      type: "delete_agent_request",
+      requestId: "delete-retired",
+      agentId: retired.id,
+    });
+    expect(peer.frames).toContainEqual(
+      expect.objectContaining({
+        message: expect.objectContaining({
+          type: "rpc_error",
+          payload: expect.objectContaining({
+            requestId: "delete-retired",
+            error: expect.stringContaining("retired"),
+          }),
+        }),
+      }),
+    );
+    expect(
+      peer.frames.some(
+        (frame) => frame.type === "session" && frame.message.type === "agent_deleted",
+      ),
+    ).toBe(false);
+    await peer.request({
+      type: "import_agent_request",
+      requestId: "reimport-retired",
+      provider: handle!.provider,
+      sessionId: handle!.sessionId,
+      cwd: daemon.staticDir,
+    });
+    expect(peer.frames).toContainEqual(
+      expect.objectContaining({
+        message: expect.objectContaining({
+          type: "status",
+          payload: expect.objectContaining({
+            requestId: "reimport-retired",
+            status: "agent_create_failed",
+          }),
+        }),
+      }),
+    );
+    await peer.request({
+      type: "clear_agent_attention",
+      requestId: "mixed-attention",
+      agentId: [retired.id, ordinary.id],
+    });
+    expect(peer.frames).toContainEqual(
+      expect.objectContaining({
+        message: expect.objectContaining({
+          type: "clear_agent_attention_response",
+          payload: expect.objectContaining({
+            agents: [expect.objectContaining({ id: ordinary.id })],
+          }),
+        }),
+      }),
+    );
+    await expect(admin.sendMessage(retired.id, "must remain fenced")).rejects.toThrow();
+  } finally {
+    peer?.close();
+    await admin.close();
+    await daemon.close();
+  }
+});
+
 test("archive and delete replies retain their historical names and reach only the requester", async () => {
   const daemon = await createTestPaseoDaemon({ mcpEnabled: false });
   const admin = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws`, appVersion: "0.8.0" });
@@ -1462,7 +1547,7 @@ test("request outcomes for import and attention reach only their requesting sock
       }),
     );
     const agent = await admin.createAgent({
-      provider: "codex",
+      provider: "mock",
       cwd: daemon.staticDir,
       title: "Attention",
     });

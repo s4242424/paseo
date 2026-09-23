@@ -11493,6 +11493,81 @@ test("failed retirement persistence leaves the live agent usable and unfenced", 
   }
 });
 
+test.each(["loading", "failed", "force"])(
+  "retirement refuses %s provider history hydration",
+  async (scenario) => {
+    const workdir = mkdtempSync(join(tmpdir(), "retirement-partial-history-"));
+    const storage = new AgentStorage(join(workdir, "agents"), logger);
+    const started = deferred<void>();
+    const allowed = deferred<void>();
+    const session = new (class extends TestAgentSession {
+      override async *streamHistory(): AsyncGenerator<AgentStreamEvent> {
+        yield {
+          type: "timeline",
+          provider: "codex",
+          item: { type: "assistant_message", text: "partial history" },
+        };
+        started.resolve();
+        await allowed.promise;
+        if (scenario === "failed") throw new Error("history unavailable");
+        yield {
+          type: "timeline",
+          provider: "codex",
+          item: { type: "assistant_message", text: "final history" },
+        };
+      }
+    })({ provider: "codex", cwd: workdir });
+    const client = new TestAgentClient();
+    vi.spyOn(client, "resumeSession").mockResolvedValue(session);
+    vi.spyOn(client, "createSession").mockResolvedValue(session);
+    const manager = new AgentManager({ clients: { codex: client }, registry: storage, logger });
+    let hydration: Promise<unknown> | undefined;
+    try {
+      const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+        workspaceId: undefined,
+      });
+      if (scenario === "force") {
+        hydration = manager.hydrateTimelineFromProvider(agent.id, { force: true });
+      } else {
+        await manager.closeAgent(agent.id);
+        await manager.deleteAgentState(agent.id);
+        hydration = ensureAgentLoaded(agent.id, {
+          agentManager: manager,
+          agentStorage: storage,
+          logger,
+        });
+      }
+      const settled = hydration.catch((error) => error);
+      await started.promise;
+      if (scenario === "failed") {
+        allowed.resolve();
+        expect(await settled).toEqual(new Error("history unavailable"));
+      }
+      await expect(
+        manager.retireAgent(agent.id, { reason: "partial", operationId: "partial-op" }),
+      ).rejects.toBeInstanceOf(AgentRetirementBusyError);
+      expect((await storage.get(agent.id))?.retirement).toBeUndefined();
+      allowed.resolve();
+      await settled;
+      if (scenario !== "failed") {
+        await manager.retireAgent(agent.id, { reason: "complete", operationId: "complete-op" });
+        const rows = await manager.getRetiredAgentTimelineRows(agent.id);
+        expect(
+          rows?.some(
+            (row) =>
+              row.item.type === "assistant_message" && row.item.text.includes("final history"),
+          ),
+        ).toBe(true);
+      }
+    } finally {
+      allowed.resolve();
+      await hydration?.catch(() => undefined);
+      await storage.flush();
+      rmSync(workdir, { recursive: true, force: true });
+    }
+  },
+);
+
 test("a cold agent cannot be retired with silently missing conversation history", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "retirement-cold-history-"));
   const storage = new AgentStorage(join(workdir, "agents"), logger);

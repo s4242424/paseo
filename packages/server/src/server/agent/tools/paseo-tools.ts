@@ -3035,12 +3035,17 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       },
     },
     async ({ agentId, limit }) => {
-      await ensureAgentLoaded(agentId, {
-        agentManager,
-        agentStorage,
-        logger: childLogger,
-      });
-      const timeline = agentManager.getTimeline(agentId);
+      const stored = await agentStorage.get(agentId);
+      if (!stored?.retirement) {
+        await ensureAgentLoaded(agentId, {
+          agentManager,
+          agentStorage,
+          logger: childLogger,
+        });
+      }
+      const timeline = stored?.retirement
+        ? (await agentManager.getRetiredAgentTimelineRows(agentId)).map((row) => row.item)
+        : agentManager.getTimeline(agentId);
       const snapshot = agentManager.getAgent(agentId);
 
       const selection = selectItemsByProjectedLimit({
@@ -3064,7 +3069,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         structuredContent: ensureValidJson({
           agentId,
           updateCount: timeline.length,
-          currentModeId: snapshot?.currentModeId ?? null,
+          currentModeId: snapshot?.currentModeId ?? stored?.lastModeId ?? null,
           content: contentWithCount,
         }),
       };

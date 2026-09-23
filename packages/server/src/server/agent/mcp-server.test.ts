@@ -214,6 +214,8 @@ function buildAgentManagerSpies() {
     getAgent: vi.fn(),
     listAgents: vi.fn().mockReturnValue([]),
     getTimeline: vi.fn().mockReturnValue([]),
+    isAgentRetired: vi.fn().mockReturnValue(false),
+    getRetiredAgentTimelineRows: vi.fn().mockResolvedValue([]),
     resumeAgentFromPersistence: vi.fn(),
     hydrateTimelineFromProvider: vi.fn().mockResolvedValue(undefined),
     appendTimelineItem: vi.fn().mockResolvedValue(undefined),
@@ -5803,6 +5805,44 @@ describe("agent snapshot MCP serialization", () => {
         },
       },
     ]);
+  });
+
+  it("reads retired get_agent_activity from frozen history without resuming a provider", async () => {
+    const { agentManager, agentStorage, spies } = createTestDeps();
+    spies.agentStorage.get.mockResolvedValue(
+      createStoredRecord({
+        id: "retired-activity",
+        retirement: {
+          operationId: "activity-op",
+          reason: "history",
+          retiredAt: "2026-09-23T00:00:00.000Z",
+        },
+      }),
+    );
+    spies.agentManager.getRetiredAgentTimelineRows.mockResolvedValue([
+      {
+        seq: 1,
+        timestamp: "2026-09-23T00:00:00.000Z",
+        item: { type: "assistant_message", text: "frozen predecessor response" },
+      },
+    ]);
+    const server = await createAgentMcpServer({
+      agentManager,
+      agentStorage,
+      logger,
+      providerSnapshotManager: createClaudeOnlyManager(),
+    });
+    const response = await registeredTool(server, "get_agent_activity").handler({
+      agentId: "retired-activity",
+    });
+    expect(response.structuredContent).toEqual(
+      expect.objectContaining({
+        updateCount: 1,
+        content: expect.stringContaining("frozen predecessor response"),
+      }),
+    );
+    expect(spies.agentManager.resumeAgentFromPersistence).not.toHaveBeenCalled();
+    expect(spies.agentManager.hydrateTimelineFromProvider).not.toHaveBeenCalled();
   });
 
   it("loads archived agents before reading get_agent_activity", async () => {

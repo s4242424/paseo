@@ -156,7 +156,7 @@ Every interactive provider entry that can resume or create a runtime — `ensure
 resume, prompt dispatch, and reload) and native unarchive — reads the stored fence first and refuses
 before any provider work starts. This covers live agents, stored-only agents, restarts, and
 concurrent requests, because they all route through the same storage read. Read-only history fetches
-do not call `ensureAgentLoaded` and stay available for a retired agent. The host captures projected timeline rows, their epoch and sequence window atomically with the fence. Timeline fetch, search, prompt indexing and fork-context reads use this frozen snapshot without opening a provider session. A first retirement requires loaded conversation history; a cold record is refused rather than silently retiring with empty history. Idempotent retries retain the original snapshot, including after restart.
+do not call `ensureAgentLoaded` and stay available for a retired agent. The host captures projected timeline rows, their epoch and sequence window atomically with the fence. Timeline fetch, search, prompt indexing and fork-context reads use this frozen snapshot without opening a provider session. A first retirement requires fully loaded conversation history; cold, loading and failed hydration states are refused. Retired records cannot be deleted, preserving the identity fence and frozen conversation through restarts. Idempotent retries retain the original snapshot, including after restart.
 
 This primitive intentionally does not implement rotation policy: it does not choose a successor,
 does not run any coordinator, and cascades to nothing. That decision belongs above core.

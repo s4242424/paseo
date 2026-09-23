@@ -1429,21 +1429,7 @@ export class AgentManager {
     const record = this.registry ? await this.registry.get(resolvedAgentId) : null;
     if (record?.retirement) {
       this.noteAgentRetired(resolvedAgentId);
-      // This is the actual provider-write boundary for every resume path,
-      // including a caller that bypasses ensureAgentLoaded and calls
-      // resumeAgentFromPersistence directly (e.g. resume_agent_request,
-      // schedule fires). Block unconditionally: a resume "purpose" hint
-      // ("history" vs "interactive") is not honored by every provider — only
-      // Codex's resumeSession actually branches on it (see
-      // agent-sdk-types.ts's AgentResumeSessionOptions docs); mock/Claude
-      // ignore the fourth argument entirely and ACP/OpenCode-style providers
-      // can resume interactively regardless of the hint. The host-owned fence
-      // must not depend on a provider choosing to cooperate with an optional
-      // hint, so this function never attempts a "safe" resume for a retired
-      // agent at all. Read-only history is served by
-      // fetchRetiredAgentTimeline/getRetiredAgentTimelineRows instead, which
-      // read committed rows from the durable timeline store directly and
-      // never call a provider.
+      // Retired history comes from stored retiredHistory, without provider resume.
       throw new AgentRetiredError(resolvedAgentId);
     }
     const currentResumeOptions = record
@@ -1901,6 +1887,9 @@ export class AgentManager {
     try {
       if (liveAgent) {
         this.assertAgentAdmitsRetirement(liveAgent);
+        if (!liveAgent.historyPrimed) {
+          throw new AgentRetirementBusyError(agentId, "conversation history is not fully loaded");
+        }
         await registry.applySnapshot(liveAgent, { internal: liveAgent.internal });
       }
 
@@ -1910,13 +1899,7 @@ export class AgentManager {
       }
 
       const requested = buildAgentRetirementRecord(options.operationId, options.reason);
-      // Captured before any close work touches the runtime: admission above
-      // already requires no active turn, so this is the agent's complete
-      // conversation as Paseo currently holds it in memory. Persisted
-      // atomically with the fence itself (same record write) — this is the
-      // sole source `fetchRetiredAgentTimeline`/`getRetiredAgentTimelineRows`
-      // read from; there is no production durable timeline store this could
-      // fall back to instead (see agent-retirement.ts).
+      // Persist the complete projected conversation atomically with the fence.
       const history = stored.retirement
         ? (stored.retiredHistory ?? null)
         : this.captureRetiredHistorySnapshot(agentId);
@@ -4169,6 +4152,7 @@ export class AgentManager {
     broadcast: boolean,
     broadcastTimeline: boolean,
   ): Promise<void> {
+    agent.historyPrimed = false;
     const historyEvents: Extract<AgentStreamEvent, { type: "timeline" }>[] = [];
     const providerSubagentEvents: Extract<AgentStreamEvent, { type: "provider_subagent" }>[] = [];
     for await (const rawEvent of agent.session.streamHistory()) {
@@ -4187,7 +4171,6 @@ export class AgentManager {
     await this.deleteCommittedTimeline(agent.id);
     this.timelineStore.delete(agent.id);
     this.timelineStore.initialize(agent.id, { timestamp: new Date().toISOString() });
-    agent.historyPrimed = true;
 
     for (const event of this.providerSubagents.deleteParent(agent.id)) {
       if (broadcast) {
@@ -4214,6 +4197,7 @@ export class AgentManager {
         });
       }
     }
+    agent.historyPrimed = true;
     this.touchUpdatedAt(agent);
     this.emitState(agent);
   }
@@ -5485,16 +5469,7 @@ export class AgentManager {
   }
 
   private requireSessionAgent(id: string): ActiveManagedAgent {
-    // Centralized here, not at each of this accessor's ~14 call sites
-    // (rewind, setMode/setModel/setThinkingOption, steer/replace, cancel,
-    // hydrate-from-legacy-history, out-of-band, pending permissions,
-    // streamAgent, reload): every one of them is either a provider write or
-    // reads state that only a genuinely live session can answer, and every
-    // one of them must refuse a retired agent even when a failed close left
-    // it live in `this.agents`. `requireAgent` (the read-only accessor closed
-    // routines like closeAgentRuntime use to finish retiring an agent) is
-    // deliberately NOT guarded here — retirement's own cleanup must still be
-    // able to reach the agent it just fenced.
+    // Guard provider access even if retirement persisted but runtime close failed.
     this.assertAgentNotRetired(id);
     const agent = this.requireAgent(id);
     if (agent.session === null) {

@@ -3720,6 +3720,7 @@ export const ServerInfoStatusPayloadSchema = z
         // Durable host-owned agent retirement (agent.retire.request); an older
         // daemon has no exclusion fence, so the client must not fall back to
         // archive as an equivalent.
+        // COMPAT(agentDurableRetirement): added in v0.9.0-beta.2, remove gate after 2027-03-23.
         agentDurableRetirement: z.boolean().optional(),
       })
       .optional(),

@@ -14,6 +14,7 @@ import type { ManagedAgent } from "./agent-manager.js";
 import type { AgentSessionConfig } from "./agent-sdk-types.js";
 import { AgentOwnerSchema, daemonExecutionKey, type DaemonAgentOwner } from "./agent-owner.js";
 import {
+  AgentRetiredError,
   AgentRetirementConflictError,
   type AgentRetirementRecord,
   type AgentRetiredHistorySnapshot,
@@ -268,6 +269,10 @@ export class AgentStorage {
   }
 
   beginDelete(agentId: string): void {
+    if (this.cache.get(agentId)?.retirement) {
+      this.deleting.delete(agentId);
+      throw new AgentRetiredError(agentId);
+    }
     this.deleting.add(agentId);
   }
 
@@ -275,6 +280,11 @@ export class AgentStorage {
     await this.load();
     this.beginDelete(agentId);
     await (this.pendingWrites.get(agentId) ?? Promise.resolve());
+    // An already-started retirement write may finish after beginDelete.
+    if (this.cache.get(agentId)?.retirement) {
+      this.deleting.delete(agentId);
+      throw new AgentRetiredError(agentId);
+    }
     const paths = Array.from(this.pathsById.get(agentId) ?? []);
     await Promise.all(
       paths.map(async (filePath) => {

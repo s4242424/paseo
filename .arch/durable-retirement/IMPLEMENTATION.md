@@ -1,3 +1,35 @@
+# Round 1 repair candidate — 23 September 2026
+
+Branch decision: **carry-forward**. The independent review at7c7a2e1fe returned
+REVISE; no release or production installation is claimed. Its four initial
+regressions were reproduced in isolated Docker (exit1), then repaired:
+
+- Require completed history hydration, including forced refresh, before retirement.
+- Preserve retired records through deletion requests, fresh storage and a deletion
+  racing an already-started atomic retirement write; return a correlated error.
+- Serve MCP predecessor activity from frozen history and process ordinary IDs in
+  mixed retired/ordinary attention batches.
+- Correct capability compatibility tags and shorten duplicated comments.
+
+Affected tests pass: manager198, storage24, MCP120 and WebSocket30 (372 total).
+The WebSocket proof includes deletion refusal and refusal to re-import the same
+provider session. Production build, server-stack typecheck and targeted lint pass.
+Two test fixtures were corrected: the MCP spy lacked isAgentRetired; a mock-only
+request test asked for unavailable Codex. These are test defects, not provider
+qualification. Compiled SDK retirement, plugin-disabled exclusion, restart, history RPCs and
+ordinary archive control pass; restart/exclusion/history add zero provider calls.
+The final independent source review is pending.
+
+Gitleaks:25 changed files,2.28 MB,zero findings. Semgrep:14 production files,74 rules,zero findings;43 unchanged session.ts lines
+partially parsed,zero changed-line overlap. The unchanged dependency lockfile's
+previous Trivy findings remain open; no clean dependency claim. No Go work; gopls
+inapplicable. Serena used; Context7 unavailable. Historical full monorepo typecheck
+passed in Docker; exact-SHA CI and real-provider/macOS/UI qualification remain open.
+
+This is the private fork's existing owner receipt, retained for continuity. Exclude
+it from any eventual upstream PR. Detailed commands and exits are in Escape's
+existing durable-proof-20260923 evidence home, review-\* artefacts.
+
 # Durable agent retirement — verified source candidate
 
 23 September 2026. Run type: implementation. Branch decision: **carry-forward**.
@@ -50,9 +82,8 @@ read-only and capability-restricted. No installed daemon was operated or changed
 
 ## Remaining gates
 
-Independent challenge and exact-commit CI have not passed. The complete monorepo
-typecheck remains a CI gate; the isolated server/client/protocol/relay/CLI stack
-passed. Host Git hooks execute npm locally, so they are disabled only for source
+Independent challenge and exact-commit CI have not passed. The full monorepo typecheck subsequently passed in Docker; exact-SHA CI
+remains open. The isolated server/client/protocol/relay/CLI stack passed. Host Git hooks execute npm locally, so they are disabled only for source
 protection under the no-host-runtime instruction; this is not a waiver of CI. Existing dependency
 findings remain. The separate rotation plugin still needs capability consumption
 and complete orchestration. macOS/real-provider/UI/production behaviour is unproved.
