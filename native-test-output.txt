@@ -1,0 +1,173 @@
+=== upstream-baseline-ui; command exit 65 ===
+Test Suite 'Selected tests' started at 2026-09-23 17:32:04.602.
+Test Suite 'PopupProofUITests.xctest' started at 2026-09-23 17:32:04.602.
+Test Suite 'PopupProofUITests' started at 2026-09-23 17:32:04.602.
+Test Case '-[PopupProofUITests.PopupProofUITests testStockTooltipKeyboardDismissalAndReopen]' started.
+    t =     0.00s Start Test at 2026-09-23 17:32:04.605
+    t =     0.02s Set Up
+    t =     0.02s Open sh.paseo.popup.proof
+    t =     0.02s     Launch sh.paseo.popup.proof
+2026-09-23 17:32:04.897 xcodebuild[79177:268118039] [MT] IDELaunchParametersSnapshot: debugger version lookup failed for path '<nil>': noURL
+2026-09-23 17:32:04.897 xcodebuild[79177:268118039] [MT] IDELaunchParametersSnapshot: no debugger version
+objc[94708]: Class UIAccessibilityLoaderWebShared is implemented in both /Library/Developer/CoreSimulator/Volumes/iOS_24A5355p/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 27.0.simruntime/Contents/Resources/RuntimeRoot/System/Library/AccessibilityBundles/WebKit.axbundle/WebKit (0x10a918398) and /Library/Developer/CoreSimulator/Volumes/iOS_24A5355p/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 27.0.simruntime/Contents/Resources/RuntimeRoot/System/Library/AccessibilityBundles/WebCore.axbundle/WebCore (0x10ac7c310). This may cause spurious casting failures and mysterious crashes. One of the duplicates must be removed or renamed.
+    t =     0.70s         Setting up automation session
+    t =     2.67s         Wait for sh.paseo.popup.proof to idle
+    t =     3.85s Waiting 8.0s for Keyboard (First Match) to exist
+    t =     4.87s     Checking `Expect predicate `existsNoRetry == 1` for object Keyboard (First Match)`
+    t =     4.87s         Checking existence of `Keyboard (First Match)`
+    t =     4.90s Waiting 4.0s for "popup-proof-context-trigger" Any to exist
+    t =     5.92s     Checking `Expect predicate `existsNoRetry == 1` for object "popup-proof-context-trigger" Any`
+    t =     5.92s         Checking existence of `"popup-proof-context-trigger" Any`
+    t =     6.00s Tap "popup-proof-context-trigger" Any
+    t =     6.00s     Wait for sh.paseo.popup.proof to idle
+    t =     6.01s     Find the "popup-proof-context-trigger" Any
+    t =     6.04s     Check for interrupting elements affecting "popup-proof-context-trigger" Other
+    t =     6.07s     Synthesize event
+    t =     6.36s     Wait for sh.paseo.popup.proof to idle
+    t =     6.58s Waiting 4.0s for Keyboard (First Match) to not exist
+    t =     7.61s     Checking `Expect predicate `existsNoRetry == 0` for object Keyboard (First Match)`
+    t =     7.61s         Checking existence of `Keyboard (First Match)`
+    t =     7.70s Waiting 4.0s for "popup-proof-tooltip" Any to exist
+    t =     8.71s     Checking `Expect predicate `existsNoRetry == 1` for object "popup-proof-tooltip" Any`
+    t =     8.71s         Checking existence of `"popup-proof-tooltip" Any`
+    t =     8.75s Waiting 4.0s for "popup-proof-tooltip-trigger-coordinates" Any to exist
+    t =     9.76s     Checking `Expect predicate `existsNoRetry == 1` for object "popup-proof-tooltip-trigger-coordinates" Any`
+    t =     9.76s         Checking existence of `"popup-proof-tooltip-trigger-coordinates" Any`
+    t =    10.81s Checking `Expect predicate `label BEGINSWITH "tooltip anchor window: x:"` for object "popup-proof-tooltip-trigger-coordinates" Any`
+    t =    10.81s     Find the "popup-proof-tooltip-trigger-coordinates" Any
+    t =    10.85s Find the "popup-proof-tooltip-trigger-coordinates" StaticText
+    t =    10.87s Find the "popup-proof-tooltip" Any
+    t =    10.93s Find the "popup-proof-tooltip" Other
+NATIVE_ANCHOR_PROOF anchor=(325.0, 771.0, 44.0, 44.0) popup=(106.0, 282.0, 262.0, 179.0) gap=310.0
+/Users/clean/dev/escape/.tmp/mobile-popup-native-proof-20260923/xctest/PopupProofUITests.swift:45: error: -[PopupProofUITests.PopupProofUITests testStockTooltipKeyboardDismissalAndReopen] : XCTAssertEqualWithAccuracy failed: ("310.0") is not equal to ("10.0") +/- ("18.0") - The native popup edge should be its configured 10-point offset from the current trigger, allowing layout rounding.
+    t =    11.05s Added attachment named 'production-tooltip-after-keyboard-dismissal'
+    t =    11.05s Tap Target Application 'sh.paseo.popup.proof'[0.06, 0.12]
+    t =    11.05s     Wait for sh.paseo.popup.proof to idle
+    t =    11.05s     Find the Target Application 'sh.paseo.popup.proof'
+    t =    11.10s     Check for interrupting elements affecting "Popup Proof" Application
+    t =    11.13s     Synthesize event
+    t =    11.13s         Find the Target Application 'sh.paseo.popup.proof'
+    t =    11.14s         Find the Target Application 'sh.paseo.popup.proof'
+    t =    11.16s         Find the Target Application 'sh.paseo.popup.proof'
+    t =    11.47s     Wait for sh.paseo.popup.proof to idle
+    t =    11.50s Waiting 3.0s for "popup-proof-tooltip" Other to not exist
+    t =    12.56s     Checking `Expect predicate `existsNoRetry == 0` for object "popup-proof-tooltip" Other`
+    t =    12.56s         Checking existence of `"popup-proof-tooltip" Other`
+    t =    12.63s Waiting 3.0s for "popup-proof-context-trigger" Other to exist
+    t =    13.64s     Checking `Expect predicate `existsNoRetry == 1` for object "popup-proof-context-trigger" Other`
+    t =    13.64s         Checking existence of `"popup-proof-context-trigger" Other`
+    t =    13.68s Tap "popup-proof-context-trigger" Other
+    t =    13.68s     Wait for sh.paseo.popup.proof to idle
+    t =    13.69s     Find the "popup-proof-context-trigger" Other
+    t =    13.71s     Check for interrupting elements affecting "popup-proof-context-trigger" Other
+    t =    13.73s     Synthesize event
+    t =    14.02s     Wait for sh.paseo.popup.proof to idle
+    t =    14.03s Waiting 3.0s for "popup-proof-tooltip" Other to exist
+    t =    15.04s     Checking `Expect predicate `existsNoRetry == 1` for object "popup-proof-tooltip" Other`
+    t =    15.04s         Checking existence of `"popup-proof-tooltip" Other`
+    t =    15.08s Tear Down
+Test Case '-[PopupProofUITests.PopupProofUITests testStockTooltipKeyboardDismissalAndReopen]' failed (15.288 seconds).
+Test Suite 'PopupProofUITests' failed at 2026-09-23 17:32:19.893.
+	 Executed 1 test, with 1 failure (0 unexpected) in 15.288 (15.290) seconds
+Test Suite 'PopupProofUITests.xctest' failed at 2026-09-23 17:32:19.893.
+	 Executed 1 test, with 1 failure (0 unexpected) in 15.288 (15.291) seconds
+Test Suite 'Selected tests' failed at 2026-09-23 17:32:19.894.
+	 Executed 1 test, with 1 failure (0 unexpected) in 15.288 (15.292) seconds
+2026-09-23 17:32:58.304 xcodebuild[79177:268118039] [MT] IDETestOperationsObserverDebug: 57.098 elapsed -- Testing started completed.
+2026-09-23 17:32:58.304 xcodebuild[79177:268118039] [MT] IDETestOperationsObserverDebug: 0.000 sec, +0.000 sec -- start
+2026-09-23 17:32:58.304 xcodebuild[79177:268118039] [MT] IDETestOperationsObserverDebug: 57.098 sec, +57.098 sec -- end
+
+Test session results, code coverage, and logs:
+	/Users/clean/dev/escape/.arch/receipts/account-plugin-recurrence-20260922/mobile-popup-proof-20260923/upstream-baseline-ui.xcresult
+
+Failing tests:
+	PopupProofUITests.testStockTooltipKeyboardDismissalAndReopen()
+
+** TEST FAILED **
+
+Testing started
+
+=== upstream-candidate-ui-final; command exit 0 ===
+Test Suite 'Selected tests' started at 2026-09-23 17:35:37.563.
+Test Suite 'PopupProofUITests.xctest' started at 2026-09-23 17:35:37.564.
+Test Suite 'PopupProofUITests' started at 2026-09-23 17:35:37.564.
+Test Case '-[PopupProofUITests.PopupProofUITests testStockTooltipKeyboardDismissalAndReopen]' started.
+    t =     0.00s Start Test at 2026-09-23 17:35:37.566
+    t =     0.02s Set Up
+    t =     0.02s Open sh.paseo.popup.proof
+    t =     0.02s     Launch sh.paseo.popup.proof
+2026-09-23 17:35:37.814 xcodebuild[28830:268304623] [MT] IDELaunchParametersSnapshot: debugger version lookup failed for path '<nil>': noURL
+2026-09-23 17:35:37.814 xcodebuild[28830:268304623] [MT] IDELaunchParametersSnapshot: no debugger version
+objc[35439]: Class UIAccessibilityLoaderWebShared is implemented in both /Library/Developer/CoreSimulator/Volumes/iOS_24A5355p/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 27.0.simruntime/Contents/Resources/RuntimeRoot/System/Library/AccessibilityBundles/WebKit.axbundle/WebKit (0x10a9a8398) and /Library/Developer/CoreSimulator/Volumes/iOS_24A5355p/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 27.0.simruntime/Contents/Resources/RuntimeRoot/System/Library/AccessibilityBundles/WebCore.axbundle/WebCore (0x10aaec310). This may cause spurious casting failures and mysterious crashes. One of the duplicates must be removed or renamed.
+    t =     0.66s         Setting up automation session
+    t =     2.71s         Wait for sh.paseo.popup.proof to idle
+    t =     3.88s Waiting 8.0s for Keyboard (First Match) to exist
+    t =     4.90s     Checking `Expect predicate `existsNoRetry == 1` for object Keyboard (First Match)`
+    t =     4.90s         Checking existence of `Keyboard (First Match)`
+    t =     4.92s Waiting 4.0s for "popup-proof-context-trigger" Any to exist
+    t =     5.94s     Checking `Expect predicate `existsNoRetry == 1` for object "popup-proof-context-trigger" Any`
+    t =     5.94s         Checking existence of `"popup-proof-context-trigger" Any`
+    t =     5.99s Tap "popup-proof-context-trigger" Any
+    t =     5.99s     Wait for sh.paseo.popup.proof to idle
+    t =     6.00s     Find the "popup-proof-context-trigger" Any
+    t =     6.02s     Check for interrupting elements affecting "popup-proof-context-trigger" Other
+    t =     6.04s     Synthesize event
+    t =     6.33s     Wait for sh.paseo.popup.proof to idle
+    t =     6.55s Waiting 4.0s for Keyboard (First Match) to not exist
+    t =     7.58s     Checking `Expect predicate `existsNoRetry == 0` for object Keyboard (First Match)`
+    t =     7.58s         Checking existence of `Keyboard (First Match)`
+    t =     7.63s Waiting 4.0s for "popup-proof-tooltip" Any to exist
+    t =     8.64s     Checking `Expect predicate `existsNoRetry == 1` for object "popup-proof-tooltip" Any`
+    t =     8.64s         Checking existence of `"popup-proof-tooltip" Any`
+    t =     8.67s Waiting 4.0s for "popup-proof-tooltip-trigger-coordinates" Any to exist
+    t =     9.68s     Checking `Expect predicate `existsNoRetry == 1` for object "popup-proof-tooltip-trigger-coordinates" Any`
+    t =     9.68s         Checking existence of `"popup-proof-tooltip-trigger-coordinates" Any`
+    t =    10.73s Checking `Expect predicate `label BEGINSWITH "tooltip anchor window: x:"` for object "popup-proof-tooltip-trigger-coordinates" Any`
+    t =    10.73s     Find the "popup-proof-tooltip-trigger-coordinates" Any
+    t =    10.76s Find the "popup-proof-tooltip-trigger-coordinates" StaticText
+    t =    10.79s Find the "popup-proof-tooltip" Any
+    t =    10.81s Find the "popup-proof-tooltip" Other
+NATIVE_ANCHOR_PROOF anchor=(325.0, 771.0, 44.0, 44.0) popup=(107.0, 582.0, 262.0, 179.0) gap=10.0
+    t =    10.91s Added attachment named 'production-tooltip-after-keyboard-dismissal'
+    t =    10.91s Tap Target Application 'sh.paseo.popup.proof'[0.06, 0.12]
+    t =    10.91s     Wait for sh.paseo.popup.proof to idle
+    t =    10.91s     Find the Target Application 'sh.paseo.popup.proof'
+    t =    10.94s     Check for interrupting elements affecting "Popup Proof" Application
+    t =    10.98s     Synthesize event
+    t =    10.98s         Find the Target Application 'sh.paseo.popup.proof'
+    t =    10.99s         Find the Target Application 'sh.paseo.popup.proof'
+    t =    11.03s         Find the Target Application 'sh.paseo.popup.proof'
+    t =    11.32s     Wait for sh.paseo.popup.proof to idle
+    t =    11.32s Waiting 3.0s for "popup-proof-tooltip" Other to not exist
+    t =    12.34s     Checking `Expect predicate `existsNoRetry == 0` for object "popup-proof-tooltip" Other`
+    t =    12.34s         Checking existence of `"popup-proof-tooltip" Other`
+    t =    12.37s Waiting 3.0s for "popup-proof-context-trigger" Other to exist
+    t =    13.39s     Checking `Expect predicate `existsNoRetry == 1` for object "popup-proof-context-trigger" Other`
+    t =    13.39s         Checking existence of `"popup-proof-context-trigger" Other`
+    t =    13.43s Tap "popup-proof-context-trigger" Other
+    t =    13.44s     Wait for sh.paseo.popup.proof to idle
+    t =    13.44s     Find the "popup-proof-context-trigger" Other
+    t =    13.45s     Check for interrupting elements affecting "popup-proof-context-trigger" Other
+    t =    13.47s     Synthesize event
+    t =    13.76s     Wait for sh.paseo.popup.proof to idle
+    t =    13.77s Waiting 3.0s for "popup-proof-tooltip" Other to exist
+    t =    14.79s     Checking `Expect predicate `existsNoRetry == 1` for object "popup-proof-tooltip" Other`
+    t =    14.79s         Checking existence of `"popup-proof-tooltip" Other`
+    t =    14.82s Tear Down
+Test Case '-[PopupProofUITests.PopupProofUITests testStockTooltipKeyboardDismissalAndReopen]' passed (15.029 seconds).
+Test Suite 'PopupProofUITests' passed at 2026-09-23 17:35:52.595.
+	 Executed 1 test, with 0 failures (0 unexpected) in 15.029 (15.031) seconds
+Test Suite 'PopupProofUITests.xctest' passed at 2026-09-23 17:35:52.595.
+	 Executed 1 test, with 0 failures (0 unexpected) in 15.029 (15.032) seconds
+Test Suite 'Selected tests' passed at 2026-09-23 17:35:52.596.
+	 Executed 1 test, with 0 failures (0 unexpected) in 15.029 (15.033) seconds
+2026-09-23 17:35:53.053 xcodebuild[28830:268304623] [MT] IDETestOperationsObserverDebug: 18.713 elapsed -- Testing started completed.
+2026-09-23 17:35:53.053 xcodebuild[28830:268304623] [MT] IDETestOperationsObserverDebug: 0.000 sec, +0.000 sec -- start
+2026-09-23 17:35:53.053 xcodebuild[28830:268304623] [MT] IDETestOperationsObserverDebug: 18.713 sec, +18.713 sec -- end
+
+Test session results, code coverage, and logs:
+	/Users/clean/dev/escape/.arch/receipts/account-plugin-recurrence-20260922/mobile-popup-proof-20260923/upstream-candidate-ui-final.xcresult
+
+** TEST SUCCEEDED **
+
+Testing started
