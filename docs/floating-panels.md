@@ -163,6 +163,13 @@ portal geometry, plus the `isMoving` worklet value. It reconciles native
 animation-end events because the controller can retain a nonzero value after
 the keyboard closes.
 
+Native tooltips use a Modal rather than a Portal. Their anchor may still move
+when the Modal dismisses the underlying IME, so refresh `measureInWindow` when
+the Modal shows, the trigger lays out, the keyboard settles, or the window
+changes. Treat every measurement as asynchronous: only the newest open
+lifecycle request may update the position, and invalidate pending requests on
+close. These are discrete lifecycle events, never a timer or measurement loop.
+
 Measure portal anchors while the dock is at rest. If a popover opens during
 motion, re-measure when `isMoving` settles. `measureInWindow` includes the
 dock's current layout and transform. Snapshot the shift at measurement time and
