@@ -2876,6 +2876,33 @@ export class DaemonClient {
     }
   }
 
+  /**
+   * Persists a durable, host-owned retirement fence and closes the agent's
+   * runtime. Unlike archive this cannot be undone: there is no unretire
+   * request. `operationId` makes a repeated call idempotent (retry after a
+   * failed close); a different `operationId` against an already-retired
+   * agent is refused by the daemon.
+   * Gated on `server_info.features.agentDurableRetirement`.
+   */
+  async retireAgent(
+    agentId: string,
+    options: { reason: string; operationId: string },
+  ): Promise<{ retiredAt: string }> {
+    this.requireAgentDurableRetirementSupport();
+    const payload = await this.sendNamespacedCorrelatedSessionRequest<"agent.retire.response">({
+      message: {
+        type: "agent.retire.request",
+        agentId,
+        reason: options.reason,
+        operationId: options.operationId,
+      },
+    });
+    if (!payload.accepted || payload.retiredAt === null) {
+      throw new Error(payload.error ?? "retireAgent rejected");
+    }
+    return { retiredAt: payload.retiredAt };
+  }
+
   async updateAgent(
     agentId: string,
     updates: { name?: string; labels?: Record<string, string> },
@@ -5986,6 +6013,12 @@ export class DaemonClient {
     // COMPAT(daemonConfigReload): added in v0.4.0, remove gate after 2027-02-14.
     if (this.lastServerInfoMessage?.features?.daemonConfigReload !== true) {
       throw new Error("Update the host to reload daemon configuration.");
+    }
+  }
+
+  private requireAgentDurableRetirementSupport(): void {
+    if (this.lastServerInfoMessage?.features?.agentDurableRetirement !== true) {
+      throw new Error("Update the host to retire agents.");
     }
   }
 

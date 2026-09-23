@@ -54,10 +54,17 @@ import {
   type ListImportableSessionsOptions,
 } from "./agent-sdk-types.js";
 import { buildArchivedAgentRecord, type ArchivedStoredAgentRecord } from "./agent-archive.js";
+import {
+  buildAgentRetirementRecord,
+  AgentRetiredError,
+  AgentRetirementBusyError,
+  type AgentRetiredHistorySnapshot,
+} from "./agent-retirement.js";
 import type { StoredAgentRecord, AgentStorage } from "./agent-storage.js";
 import type { AgentOwner } from "./agent-owner.js";
 import {
   InMemoryAgentTimelineStore,
+  fetchProjectedTimelineSnapshot,
   type SeedAgentTimelineOptions,
 } from "./agent-timeline-store.js";
 import type {
@@ -714,6 +721,21 @@ export class AgentManager {
   private readonly inFlightAgentCloses = new Map<string, Promise<void>>();
   private readonly reloadedSessionCloses = new WeakMap<AgentSession, Promise<void>>();
   private readonly lifecycleMutationTails = new Map<string, Promise<void>>();
+  // Set for the duration of retireAgentUnlocked, including a retried close
+  // after a prior close failure. streamAgent consults it synchronously to
+  // reject a new admission racing an in-flight retirement before the fence is
+  // observable from storage.
+  private readonly retiringAgentIds = new Set<string>();
+  // Authoritative, process-lifetime cache of confirmed-retired agent ids.
+  // Populated the instant the durable fence is persisted (before any close
+  // attempt) and NEVER cleared — a close failure must not un-retire an agent.
+  // Every synchronous admission check (streamAgent, respondToPermission,
+  // reload, ensureAgentLoaded's existing/inflight fast path) consults this
+  // instead of re-reading storage, so a still-live agent left over from a
+  // failed close stays excluded. Storage remains the source of truth across
+  // restarts; this is only a same-process accelerator populated by every code
+  // path that discovers `record.retirement` from storage.
+  private readonly retiredAgentIds = new Set<string>();
   private readonly agentStreamCoalescer: AgentStreamCoalescer;
   private mcpBaseUrl: string | null;
   private readonly mcpAuthToken: string | null;
@@ -1155,6 +1177,15 @@ export class AgentManager {
 
   async getTimelineRows(id: string): Promise<AgentTimelineRow[]> {
     this.requireAgent(id);
+    return this.projectDurableTimelineRows(id);
+  }
+
+  fetchTimeline(id: string, options?: AgentTimelineFetchOptions): AgentTimelineFetchResult {
+    this.requireAgent(id);
+    return this.timelineStore.fetch(id, options);
+  }
+
+  private async projectDurableTimelineRows(id: string): Promise<AgentTimelineRow[]> {
     if (this.durableTimelineStore) {
       return projectTimelineRows({
         rows: await this.durableTimelineStore.getCommittedRows(id),
@@ -1164,9 +1195,39 @@ export class AgentManager {
     return this.timelineStore.getRows(id);
   }
 
-  fetchTimeline(id: string, options?: AgentTimelineFetchOptions): AgentTimelineFetchResult {
-    this.requireAgent(id);
-    return this.timelineStore.fetch(id, options);
+  private async requireRetiredAgentRecord(agentId: string): Promise<StoredAgentRecord> {
+    const record = this.registry ? await this.registry.get(agentId) : null;
+    if (!record) {
+      throw new Error(`Agent ${agentId} not found`);
+    }
+    if (!record.retirement) {
+      throw new Error(`Agent ${agentId} is not retired`);
+    }
+    return record;
+  }
+
+  private captureRetiredHistorySnapshot(agentId: string): AgentRetiredHistorySnapshot {
+    if (!this.timelineStore.has(agentId)) {
+      throw new Error(`Cannot retire agent ${agentId}: conversation history is not loaded`);
+    }
+    const { epoch, rows, window } = this.timelineStore.fetch(agentId, { limit: 0 });
+    return { epoch, rows, window, capturedAt: new Date().toISOString() };
+  }
+
+  // Frozen host-owned history never opens a provider session, even after restart.
+  async getRetiredAgentTimelineRows(agentId: string): Promise<AgentTimelineRow[]> {
+    const record = await this.requireRetiredAgentRecord(agentId);
+    if (!record.retiredHistory) throw new Error(`Retired history unavailable: ${agentId}`);
+    return record.retiredHistory.rows.map((row) => Object.assign({}, row, { seq: row.seqEnd }));
+  }
+
+  async fetchRetiredAgentTimeline(
+    agentId: string,
+    options?: AgentTimelineFetchOptions,
+  ): Promise<AgentTimelineFetchResult> {
+    const record = await this.requireRetiredAgentRecord(agentId);
+    if (!record.retiredHistory) throw new Error(`Retired history unavailable: ${agentId}`);
+    return fetchProjectedTimelineSnapshot(record.retiredHistory, options);
   }
 
   listProviderSubagents(parentAgentId: string): ProviderSubagentDescriptor[] {
@@ -1202,21 +1263,48 @@ export class AgentManager {
     return this.providerSubagents.fetchTimeline(parentAgentId, subagentId, options);
   }
 
-  createAgent(
+  async createAgent(
     config: AgentSessionConfig,
     agentId: string | undefined,
     options: CreateAgentOptions,
   ): Promise<ManagedAgent> {
-    return this.trackAgentRegistrationOperation(this.createAgentInternal(config, agentId, options));
+    // Resolved once, here, so the lifecycle lane key and the id actually used
+    // to create the session are always the same identity. Routed through the
+    // same per-agent lane as retire/resume/archive/detach so an explicit,
+    // reused id cannot be created concurrently with a retire of that same id
+    // racing to a different outcome than the lane's serialization dictates.
+    const resolvedAgentId = validateAgentId(agentId ?? this.idFactory(), "createAgent");
+    return this.trackAgentRegistrationOperation(
+      this.runLifecycleMutation(resolvedAgentId, () =>
+        this.createAgentInternal(config, resolvedAgentId, options),
+      ),
+    );
+  }
+
+  /** Guards both new creation and identity reuse: a caller-supplied `agentId`
+   * that names an already-retired identity must not be resurrected by a
+   * fresh `createAgent` call, in this process or after a restart. Checked
+   * before `deleteAgentState` and before any provider work. */
+  private async assertAgentIdentityNotRetired(agentId: string): Promise<void> {
+    if (this.retiredAgentIds.has(agentId)) {
+      throw new AgentRetiredError(agentId);
+    }
+    if (this.registry) {
+      const stored = await this.registry.get(agentId);
+      if (stored?.retirement) {
+        this.noteAgentRetired(agentId);
+        throw new AgentRetiredError(agentId);
+      }
+    }
   }
 
   private async createAgentInternal(
     config: AgentSessionConfig,
-    agentId: string | undefined,
+    resolvedAgentId: string,
     options: CreateAgentOptions,
   ): Promise<ManagedAgent> {
     this.assertAcceptingAgentRegistrations();
-    const resolvedAgentId = validateAgentId(agentId ?? this.idFactory(), "createAgent");
+    await this.assertAgentIdentityNotRetired(resolvedAgentId);
     if (this.pluginLifecycle && !config.internal) {
       const request = await this.pluginLifecycle.before("agent.create", {
         config,
@@ -1339,6 +1427,25 @@ export class AgentManager {
     // Decide residency from durable state inside the lifecycle lane. A loader may
     // have read the record before a queued archive or restore completed.
     const record = this.registry ? await this.registry.get(resolvedAgentId) : null;
+    if (record?.retirement) {
+      this.noteAgentRetired(resolvedAgentId);
+      // This is the actual provider-write boundary for every resume path,
+      // including a caller that bypasses ensureAgentLoaded and calls
+      // resumeAgentFromPersistence directly (e.g. resume_agent_request,
+      // schedule fires). Block unconditionally: a resume "purpose" hint
+      // ("history" vs "interactive") is not honored by every provider — only
+      // Codex's resumeSession actually branches on it (see
+      // agent-sdk-types.ts's AgentResumeSessionOptions docs); mock/Claude
+      // ignore the fourth argument entirely and ACP/OpenCode-style providers
+      // can resume interactively regardless of the hint. The host-owned fence
+      // must not depend on a provider choosing to cooperate with an optional
+      // hint, so this function never attempts a "safe" resume for a retired
+      // agent at all. Read-only history is served by
+      // fetchRetiredAgentTimeline/getRetiredAgentTimelineRows instead, which
+      // read committed rows from the durable timeline store directly and
+      // never call a provider.
+      throw new AgentRetiredError(resolvedAgentId);
+    }
     const currentResumeOptions = record
       ? { purpose: record.archivedAt ? ("history" as const) : ("interactive" as const) }
       : resumeOptions;
@@ -1482,6 +1589,7 @@ export class AgentManager {
     options?: { rehydrateFromDisk?: boolean },
   ): Promise<ManagedAgent> {
     this.assertAcceptingAgentRegistrations();
+    this.assertAgentNotRetired(agentId);
     let existing = this.requireSessionAgent(agentId);
     if (this.hasInFlightRun(agentId)) {
       await this.cancelAgentRunBefore(agentId, "reload");
@@ -1719,6 +1827,121 @@ export class AgentManager {
 
   async archiveAgent(agentId: string): Promise<{ archivedAt: string }> {
     return this.runLifecycleMutation(agentId, () => this.archiveAgentUnlocked(agentId));
+  }
+
+  /**
+   * Persists a durable, host-owned retirement fence and closes the runtime.
+   * Unlike archive this is not reversible: there is no unretire operation.
+   * Admission is refused (no force bypass) when the agent has active
+   * foreground work, unresolved permission state, or running provider-managed
+   * children, because those cannot be safely abandoned mid-flight. The fence
+   * is persisted before the runtime closes; a close failure leaves the fence
+   * in place so a retry can finish cleanup without ever re-admitting work.
+   */
+  async retireAgent(
+    agentId: string,
+    options: { reason: string; operationId: string },
+  ): Promise<{ retiredAt: string }> {
+    return this.runLifecycleMutation(agentId, () => this.retireAgentUnlocked(agentId, options));
+  }
+
+  /** Synchronous, authoritative within this process: true once the durable
+   * fence has been observed, regardless of whether the runtime ever closed. */
+  isAgentRetired(agentId: string): boolean {
+    return this.retiredAgentIds.has(agentId);
+  }
+
+  private noteAgentRetired(agentId: string): void {
+    this.retiredAgentIds.add(agentId);
+  }
+
+  private assertAgentNotRetired(agentId: string): void {
+    if (this.retiredAgentIds.has(agentId) || this.retiringAgentIds.has(agentId)) {
+      throw new AgentRetiredError(agentId);
+    }
+  }
+
+  private assertAgentAdmitsRetirement(agent: LiveManagedAgent): void {
+    if (agent.activeForegroundTurnId || this.runs.hasRun(agent.id)) {
+      throw new AgentRetirementBusyError(agent.id, "agent has an active foreground turn");
+    }
+    if (agent.pendingPermissions.size > 0) {
+      throw new AgentRetirementBusyError(agent.id, "agent has a pending permission request");
+    }
+    if (agent.inFlightPermissionResponses.size > 0) {
+      throw new AgentRetirementBusyError(agent.id, "agent has an in-flight permission response");
+    }
+    // Conservative by design, not just for "running": the task protocol can
+    // miss a terminal event, route a backgrounded child that emits no frames
+    // at all, or never declare a filtered task a descriptor in the first
+    // place (see agent-lifecycle.md's Claude-provider-subagents gotchas).
+    // A stored "completed"/"failed"/"canceled" status is the store's best
+    // record, not a proof that nothing can still be running underneath it.
+    // Any known child at all is treated as unproven-safe, matching the old
+    // integrated admission's conservative rule. This does not touch ordinary
+    // Paseo-managed subagents (tracked separately via parent-agent-id
+    // labels/cascade-archive), which are unrelated to this check.
+    const hasProviderManagedChildren = this.providerSubagents.list(agent.id).length > 0;
+    if (hasProviderManagedChildren) {
+      throw new AgentRetirementBusyError(
+        agent.id,
+        "agent has provider-managed children whose lifecycle cannot be proven safe to abandon",
+      );
+    }
+  }
+
+  private async retireAgentUnlocked(
+    agentId: string,
+    options: { reason: string; operationId: string },
+  ): Promise<{ retiredAt: string }> {
+    const registry = this.requireRegistry();
+    const liveAgent = this.agents.get(agentId);
+
+    this.retiringAgentIds.add(agentId);
+    try {
+      if (liveAgent) {
+        this.assertAgentAdmitsRetirement(liveAgent);
+        await registry.applySnapshot(liveAgent, { internal: liveAgent.internal });
+      }
+
+      const stored = await registry.get(agentId);
+      if (!stored) {
+        throw new Error(`Agent ${agentId} not found`);
+      }
+
+      const requested = buildAgentRetirementRecord(options.operationId, options.reason);
+      // Captured before any close work touches the runtime: admission above
+      // already requires no active turn, so this is the agent's complete
+      // conversation as Paseo currently holds it in memory. Persisted
+      // atomically with the fence itself (same record write) — this is the
+      // sole source `fetchRetiredAgentTimeline`/`getRetiredAgentTimelineRows`
+      // read from; there is no production durable timeline store this could
+      // fall back to instead (see agent-retirement.ts).
+      const history = stored.retirement
+        ? (stored.retiredHistory ?? null)
+        : this.captureRetiredHistorySnapshot(agentId);
+      // Persist before any runtime close: on persistence failure this throws
+      // and the agent keeps running normally, which is the correct outcome
+      // for "no success" on a failed fence write.
+      const persisted = await registry.markRetired(agentId, requested, history);
+      const retirement = persisted.retirement ?? requested;
+      // Durable from this instant, independent of close outcome below: a
+      // close failure must never leave a still-live agent unguarded.
+      this.noteAgentRetired(agentId);
+
+      if (liveAgent) {
+        // Close failure here must not be swallowed: the fence is already
+        // durable, so the caller sees the failure and can retry the close
+        // without ever reporting successor-safe readiness prematurely. The
+        // history snapshot above is already durable by this point regardless
+        // of whether close succeeds.
+        await this.closeAgentRuntime(agentId);
+      }
+
+      return { retiredAt: retirement.retiredAt };
+    } finally {
+      this.retiringAgentIds.delete(agentId);
+    }
   }
 
   private async archiveAgentUnlocked(
@@ -2183,6 +2406,13 @@ export class AgentManager {
     if (!record || !record.archivedAt) {
       return false;
     }
+    if (record.retirement) {
+      // Retirement is a durable fence, not archive: unarchive must not run
+      // the provider's native restore hook for a retired agent, since that
+      // is itself an interactive provider entry.
+      this.noteAgentRetired(agentId);
+      throw new AgentRetiredError(agentId);
+    }
 
     // Close and native restore share the lifecycle lane with persisted resume.
     // No new history or interactive runtime can acquire the writer between them.
@@ -2359,6 +2589,7 @@ export class AgentManager {
     agentId: string,
     item: AgentTimelineItem,
   ): Promise<{ seq: number; epoch: string }> {
+    this.assertAgentNotRetired(agentId);
     const agent = this.requireAgent(agentId);
     item = limitAgentTimelineItemContent(item);
     this.touchUpdatedAt(agent);
@@ -2434,6 +2665,7 @@ export class AgentManager {
     prompt: AgentPromptInput,
     options?: AgentRunOptions,
   ): AsyncGenerator<AgentStreamEvent> {
+    this.assertAgentNotRetired(agentId);
     const existingAgent = this.requireSessionAgent(agentId);
     this.logger.trace(
       {
@@ -2939,6 +3171,7 @@ export class AgentManager {
     requestId: string,
     response: AgentPermissionResponse,
   ): Promise<AgentPermissionResult | void> {
+    this.assertAgentNotRetired(agentId);
     const agent = this.requireAgent(agentId);
     if (agent.inFlightPermissionResponses.has(requestId)) {
       throw new Error("A response to this permission request is already being submitted");
@@ -5252,6 +5485,17 @@ export class AgentManager {
   }
 
   private requireSessionAgent(id: string): ActiveManagedAgent {
+    // Centralized here, not at each of this accessor's ~14 call sites
+    // (rewind, setMode/setModel/setThinkingOption, steer/replace, cancel,
+    // hydrate-from-legacy-history, out-of-band, pending permissions,
+    // streamAgent, reload): every one of them is either a provider write or
+    // reads state that only a genuinely live session can answer, and every
+    // one of them must refuse a retired agent even when a failed close left
+    // it live in `this.agents`. `requireAgent` (the read-only accessor closed
+    // routines like closeAgentRuntime use to finish retiring an agent) is
+    // deliberately NOT guarded here — retirement's own cleanup must still be
+    // able to reach the agent it just fenced.
+    this.assertAgentNotRetired(id);
     const agent = this.requireAgent(id);
     if (agent.session === null) {
       throw new Error(`Agent '${agent.id}' has no managed session`);

@@ -299,6 +299,94 @@ describe("AgentStorage", () => {
     expect(recordAfterSnapshot?.archivedAt).toBe(archivedAt);
   });
 
+  test("markRetired persists an immutable fence and is idempotent for the same operation", async () => {
+    const agentId = "agent-retired";
+    await storage.applySnapshot(createManagedAgent({ id: agentId, lifecycle: "idle" }));
+
+    const retirement = {
+      operationId: "op-1",
+      reason: "durable exclusion test",
+      retiredAt: "2025-01-05T00:00:00.000Z",
+    };
+    const first = await storage.markRetired(agentId, retirement);
+    expect(first.retirement).toEqual(retirement);
+
+    const second = await storage.markRetired(agentId, retirement);
+    expect(second.retirement).toEqual(retirement);
+
+    const stored = await storage.get(agentId);
+    expect(stored?.retirement).toEqual(retirement);
+  });
+
+  test("markRetired refuses a conflicting operation once retired", async () => {
+    const agentId = "agent-retired-conflict";
+    await storage.applySnapshot(createManagedAgent({ id: agentId, lifecycle: "idle" }));
+
+    await storage.markRetired(agentId, {
+      operationId: "op-1",
+      reason: "first",
+      retiredAt: "2025-01-05T00:00:00.000Z",
+    });
+
+    await expect(
+      storage.markRetired(agentId, {
+        operationId: "op-2",
+        reason: "second",
+        retiredAt: "2025-01-06T00:00:00.000Z",
+      }),
+    ).rejects.toThrow(/already retired/);
+
+    const stored = await storage.get(agentId);
+    expect(stored?.retirement?.operationId).toBe("op-1");
+  });
+
+  test("applySnapshot preserves the retirement fence across a later snapshot flush", async () => {
+    const agentId = "agent-retired-preserved";
+    await storage.applySnapshot(createManagedAgent({ id: agentId, lifecycle: "idle" }));
+
+    const retirement = {
+      operationId: "op-1",
+      reason: "durable exclusion test",
+      retiredAt: "2025-01-05T00:00:00.000Z",
+    };
+    await storage.markRetired(agentId, retirement);
+
+    await storage.applySnapshot(
+      createManagedAgent({
+        id: agentId,
+        lifecycle: "idle",
+        updatedAt: new Date("2025-01-06T00:00:00.000Z"),
+      }),
+    );
+
+    const stored = await storage.get(agentId);
+    expect(stored?.retirement).toEqual(retirement);
+  });
+
+  test("a plain upsert cannot erase a persisted retirement fence, even with a stale in-memory copy", async () => {
+    const agentId = "agent-retired-stale-upsert";
+    await storage.applySnapshot(createManagedAgent({ id: agentId, lifecycle: "idle" }));
+
+    // A caller reads the record before retirement lands, unaware of the fence.
+    const staleCopy = await storage.get(agentId);
+    if (!staleCopy) throw new Error("expected a stored record");
+
+    const retirement = {
+      operationId: "op-1",
+      reason: "durable exclusion test",
+      retiredAt: "2025-01-05T00:00:00.000Z",
+    };
+    await storage.markRetired(agentId, retirement);
+
+    // The stale, retirement-unaware copy is written back wholesale, as an
+    // unrelated metadata update (title change, label patch, etc.) would.
+    await storage.upsert({ ...staleCopy, title: "Renamed after retirement" });
+
+    const stored = await storage.get(agentId);
+    expect(stored?.retirement).toEqual(retirement);
+    expect(stored?.title).toBe("Renamed after retirement");
+  });
+
   test("stores titles independently of snapshots", async () => {
     await storage.applySnapshot(
       createManagedAgent({

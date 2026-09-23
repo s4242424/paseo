@@ -99,6 +99,9 @@ describe("SessionAuthorization", () => {
       "restart_server_request",
       "terminal_input",
       "hub.management.daemon.permissions.update.request",
+      // Retirement is a durable, one-way host primitive: a Hub principal must
+      // not get it for free the way ordinary agent lifecycle operations do.
+      "agent.retire.request",
     ] as const) {
       expect(authorization.allowsInbound(inboundMessage(type))).toBe(false);
     }
@@ -111,6 +114,34 @@ describe("SessionAuthorization", () => {
     authorization.replacePermissions([]);
     expect(authorization.allowsInbound(inboundMessage("send_agent_message_request"))).toBe(false);
     expect(authorization.allowsOutbound(outboundMessage("agent_update"))).toBe(false);
+  });
+
+  test("agent.retire.request requires workspace.write and grants no Hub escalation", () => {
+    const writer = new SessionAuthorization(["workspace.write"]);
+    expect(writer.allowsInbound(inboundMessage("agent.retire.request"))).toBe(true);
+
+    const reader = new SessionAuthorization(["workspace.read"]);
+    expect(reader.allowsInbound(inboundMessage("agent.retire.request"))).toBe(false);
+
+    const hub = new SessionAuthorization(["hub.execute"]);
+    expect(hub.allowsInbound(inboundMessage("agent.retire.request"))).toBe(false);
+
+    const none = new SessionAuthorization([]);
+    expect(none.allowsInbound(inboundMessage("agent.retire.request"))).toBe(false);
+  });
+
+  test("agent.retire.response requires workspace.write and grants no Hub escalation", () => {
+    const writer = new SessionAuthorization(["workspace.write"]);
+    expect(writer.allowsOutbound(outboundMessage("agent.retire.response"))).toBe(true);
+
+    const reader = new SessionAuthorization(["workspace.read"]);
+    expect(reader.allowsOutbound(outboundMessage("agent.retire.response"))).toBe(false);
+
+    const hub = new SessionAuthorization(["hub.execute"]);
+    expect(hub.allowsOutbound(outboundMessage("agent.retire.response"))).toBe(false);
+
+    const none = new SessionAuthorization([]);
+    expect(none.allowsOutbound(outboundMessage("agent.retire.response"))).toBe(false);
   });
 
   test("correlated authorization errors can always be emitted", () => {

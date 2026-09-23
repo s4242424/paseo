@@ -7,6 +7,7 @@ import {
   archiveAgentCommand,
   cancelAgentRunCommand,
   detachAgentCommand,
+  retireAgentCommand,
   setAgentModeCommand,
   updateAgentCommand,
   type LifecycleAgentSnapshot,
@@ -42,6 +43,8 @@ class FakeLifecycleAgentManager implements LifecycleAgentManager {
   readonly notifiedAgentIds: string[] = [];
   readonly modeUpdates: Array<{ agentId: string; modeId: string }> = [];
   readonly detachedAgentIds: string[] = [];
+  readonly retiredAgentIds: Array<{ agentId: string; reason: string; operationId: string }> = [];
+  retireRejection: Error | null = null;
   inFlightAgentIds = new Set<string>();
   readonly settledDuringCancellationAgentIds = new Set<string>();
   readonly rejectedCancellationAgentIds = new Set<string>();
@@ -139,6 +142,24 @@ class FakeLifecycleAgentManager implements LifecycleAgentManager {
       live: this.liveAgents.has(agentId),
       previousParentAgentId,
     };
+  }
+
+  async retireAgent(
+    agentId: string,
+    options: { reason: string; operationId: string },
+  ): Promise<{ retiredAt: string }> {
+    if (this.retireRejection) {
+      throw this.retireRejection;
+    }
+    this.retiredAgentIds.push({ agentId, ...options });
+    this.liveAgents.delete(agentId);
+    const retiredAt = "2026-05-10T11:00:00.000Z";
+    const existing = this.storage.records.get(agentId) ?? storedAgent(agentId);
+    this.storage.records.set(agentId, {
+      ...existing,
+      retirement: { operationId: options.operationId, reason: options.reason, retiredAt },
+    });
+    return { retiredAt };
   }
 
   notifyAgentState(agentId: string): void {
@@ -320,6 +341,43 @@ describe("agent lifecycle commands", () => {
       previousParentAgentId: null,
       record: storedAgent("agent-1"),
     });
+  });
+
+  test("retires an agent and returns the persisted record", async () => {
+    const storage = new FakeLifecycleAgentStorage();
+    storage.records.set("agent-1", storedAgent("agent-1"));
+    const manager = new FakeLifecycleAgentManager(storage);
+    manager.liveAgents.set("agent-1", managedAgent("agent-1", "idle"));
+
+    const result = await retireAgentCommand(
+      { agentManager: manager, agentStorage: storage },
+      { agentId: "agent-1", reason: "isolation test", operationId: "op-1" },
+    );
+
+    expect(result.retiredAt).toBe("2026-05-10T11:00:00.000Z");
+    expect(result.record.retirement).toEqual({
+      operationId: "op-1",
+      reason: "isolation test",
+      retiredAt: "2026-05-10T11:00:00.000Z",
+    });
+    expect(manager.retiredAgentIds).toEqual([
+      { agentId: "agent-1", reason: "isolation test", operationId: "op-1" },
+    ]);
+  });
+
+  test("propagates a busy rejection without reporting acceptance", async () => {
+    const storage = new FakeLifecycleAgentStorage();
+    storage.records.set("agent-1", storedAgent("agent-1"));
+    const manager = new FakeLifecycleAgentManager(storage);
+    manager.retireRejection = new Error("agent has an active foreground turn");
+
+    await expect(
+      retireAgentCommand(
+        { agentManager: manager, agentStorage: storage },
+        { agentId: "agent-1", reason: "isolation test", operationId: "op-1" },
+      ),
+    ).rejects.toThrow("agent has an active foreground turn");
+    expect(storage.records.get("agent-1")?.retirement).toBeUndefined();
   });
 
   test("sets an agent mode and returns the accepted mode", async () => {

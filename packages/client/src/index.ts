@@ -263,6 +263,16 @@ export interface PaseoAgentCreateOptions {
 
 export type PaseoWorkspaceAgentCreateOptions = Omit<PaseoAgentCreateOptions, "cwd">;
 
+export interface PaseoAgentRetireOptions {
+  reason: string;
+  /** Idempotency key for this retirement operation; a retry after a failed
+   * close should reuse the same value. */
+  operationId: string;
+}
+export interface PaseoAgentRetireResult {
+  retiredAt: string;
+}
+
 export interface PaseoAgentRefetchResult {
   agent: PaseoAgent;
   project: ProjectPlacementPayload | null;
@@ -380,6 +390,12 @@ export interface PaseoAgentHandle {
   commands(options?: PaseoAgentCommandsOptions): Promise<PaseoAgentCommandsResult>;
   archive(): Promise<{ archivedAt: string }>;
   detach(): Promise<void>;
+  /**
+   * Persists a durable, host-owned retirement fence and closes the runtime.
+   * Unlike `archive()` this cannot be undone. Requires
+   * `server_info.features.agentDurableRetirement`; an older host throws.
+   */
+  retire(options: PaseoAgentRetireOptions): Promise<PaseoAgentRetireResult>;
   subscribe(handler: (update: PaseoAgentUpdate) => void): () => void;
 }
 
@@ -980,6 +996,7 @@ function createAgentHandleFactory(
       detach: async () => {
         await daemonClient.detachAgent(id);
       },
+      retire: async (options) => daemonClient.retireAgent(id, options),
       subscribe: (handler) =>
         listen((update) => {
           if (update.kind === "upsert" && update.agent.id === id) {

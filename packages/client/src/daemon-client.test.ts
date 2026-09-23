@@ -4793,6 +4793,73 @@ test("detaches an agent through the namespaced detach RPC", async () => {
   await expect(promise).resolves.toBeUndefined();
 });
 
+test("retireAgent requires daemon support before dispatching requests", async () => {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "retire_feature_gate_unit_test",
+    transportFactory: () => mock.transport,
+    reconnect: { enabled: false },
+  });
+  clients.push(client);
+  const connecting = client.connect();
+  mock.triggerOpen({ features: {} });
+  await connecting;
+
+  await expect(
+    client.retireAgent("agent-1", { reason: "test", operationId: "op-1" }),
+  ).rejects.toThrow("Update the host to retire agents.");
+  expect(mock.sent).toEqual([]);
+});
+
+test("retires an agent through the namespaced retire RPC when the daemon advertises support", async () => {
+  const logger = createMockLogger();
+  const mock = createMockTransport();
+
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "clsk_unit_test",
+    logger,
+    reconnect: { enabled: false },
+    transportFactory: () => mock.transport,
+  });
+  clients.push(client);
+
+  const connectPromise = client.connect();
+  mock.triggerOpen({ features: { agentDurableRetirement: true } });
+  await connectPromise;
+
+  const promise = client.retireAgent("child-agent", {
+    reason: "isolation test",
+    operationId: "op-1",
+  });
+
+  expect(mock.sent).toHaveLength(1);
+  const request = parseSentFrame(mock.sent[0]);
+  expect(request).toMatchObject({
+    type: "agent.retire.request",
+    agentId: "child-agent",
+    reason: "isolation test",
+    operationId: "op-1",
+  });
+  expect(typeof request.requestId).toBe("string");
+
+  mock.triggerMessage(
+    wrapSessionMessage({
+      type: "agent.retire.response",
+      payload: {
+        requestId: request.requestId,
+        agentId: "child-agent",
+        accepted: true,
+        error: null,
+        retiredAt: "2026-05-10T11:00:00.000Z",
+      },
+    }),
+  );
+
+  await expect(promise).resolves.toEqual({ retiredAt: "2026-05-10T11:00:00.000Z" });
+});
+
 test("sends active-scoped fetch_agents_request", async () => {
   const logger = createMockLogger();
   const mock = createMockTransport();

@@ -4,11 +4,20 @@ import { z } from "zod";
 import type { Logger } from "pino";
 
 import { writeJsonFileAtomic } from "../atomic-file.js";
-import { AgentFeatureSchema, AgentStatusSchema } from "../messages.js";
+import {
+  AgentFeatureSchema,
+  AgentStatusSchema,
+  AgentTimelineItemPayloadSchema,
+} from "../messages.js";
 import { toStoredAgentRecord } from "./agent-projections.js";
 import type { ManagedAgent } from "./agent-manager.js";
 import type { AgentSessionConfig } from "./agent-sdk-types.js";
 import { AgentOwnerSchema, daemonExecutionKey, type DaemonAgentOwner } from "./agent-owner.js";
+import {
+  AgentRetirementConflictError,
+  type AgentRetirementRecord,
+  type AgentRetiredHistorySnapshot,
+} from "./agent-retirement.js";
 
 const SERIALIZABLE_CONFIG_SCHEMA = z
   .object({
@@ -28,6 +37,40 @@ const SERIALIZABLE_CONFIG_SCHEMA = z
       .optional(),
     systemPrompt: z.string().nullable().optional(),
     mcpServers: z.record(z.string(), z.any()).nullable().optional(),
+  })
+  .nullable()
+  .optional();
+
+const AGENT_RETIREMENT_SCHEMA = z
+  .object({
+    operationId: z.string(),
+    reason: z.string(),
+    retiredAt: z.string(),
+  })
+  .nullable()
+  .optional();
+
+// Persist projected rows intact so cursors and source sequence ranges survive restart.
+const AGENT_RETIRED_HISTORY_SCHEMA = z
+  .object({
+    epoch: z.string(),
+    window: z.object({ minSeq: z.number(), maxSeq: z.number(), nextSeq: z.number() }),
+    rows: z.array(
+      z.object({
+        seq: z.number(),
+        item: AgentTimelineItemPayloadSchema,
+        timestamp: z.string(),
+        turnId: z.string().optional(),
+        providerMessageId: z.string().optional(),
+        seqStart: z.number(),
+        seqEnd: z.number(),
+        sourceSeqRanges: z.array(z.object({ startSeq: z.number(), endSeq: z.number() })),
+        collapsed: z.array(
+          z.enum(["assistant_merge", "reasoning_merge", "tool_lifecycle", "identity"]),
+        ),
+      }),
+    ),
+    capturedAt: z.string(),
   })
   .nullable()
   .optional();
@@ -75,6 +118,15 @@ const STORED_AGENT_SCHEMA = z.object({
   internal: z.boolean().optional(),
   archivedAt: z.string().nullable().optional(),
   owner: AgentOwnerSchema.optional(),
+  // Immutable durable-retirement fence, separate from archivedAt. Missing
+  // means an ordinary agent. There is no field or method that clears it once
+  // set — see agent-retirement.ts.
+  retirement: AGENT_RETIREMENT_SCHEMA,
+  // Frozen timeline snapshot captured at retirement time; the sole source
+  // for a retired agent's read-only history. Missing means no snapshot was
+  // captured (a genuinely cold retire) — served as truthfully empty, not an
+  // error. Immutable once set, same as `retirement`.
+  retiredHistory: AGENT_RETIRED_HISTORY_SCHEMA,
 });
 
 export type SerializableAgentConfig = Pick<
@@ -156,7 +208,16 @@ export class AgentStorage {
   }
 
   private queueRecordWrite(record: StoredAgentRecord): Promise<void> {
-    return this.queueRecordMutation(record.id, () => record);
+    // Store-boundary protection for every `upsert()` caller in the codebase,
+    // present and future: none of them may erase a persisted retirement
+    // fence or its captured history snapshot, whether or not their in-memory
+    // copy of the record still carries them. Only `markRetired` (via
+    // `queueRecordMutation` directly) may set either field from unset.
+    return this.queueRecordMutation(record.id, (existing) =>
+      existing?.retirement
+        ? { ...record, retirement: existing.retirement, retiredHistory: existing.retiredHistory }
+        : record,
+    );
   }
 
   private queueRecordMutation(
@@ -259,8 +320,59 @@ export class AgentStorage {
       if (existing && existing.archivedAt !== undefined) {
         record.archivedAt = existing.archivedAt;
       }
+      // Retirement (and its captured history snapshot) is an immutable
+      // fence: once persisted it must survive every later upsert/
+      // applySnapshot, including a stale in-flight snapshot that started
+      // before retirement landed.
+      if (existing && existing.retirement !== undefined) {
+        record.retirement = existing.retirement;
+        record.retiredHistory = existing.retiredHistory;
+      }
       return record;
     });
+  }
+
+  /**
+   * Persists the durable-retirement fence, and its frozen history snapshot,
+   * for an agent — in the same atomic record write, so a process crash
+   * between the two is not observable: either both land or neither does.
+   * Idempotent for a repeated call with the same `operationId` (a retry
+   * after a close failure, which never re-captures or replaces the snapshot
+   * from the first successful call); refuses a different operation while one
+   * is already recorded. There is no corresponding "clear" method.
+   */
+  async markRetired(
+    agentId: string,
+    retirement: AgentRetirementRecord,
+    history: AgentRetiredHistorySnapshot | null = null,
+  ): Promise<StoredAgentRecord> {
+    await this.load();
+    await this.waitForPendingWrite(agentId);
+    let result: StoredAgentRecord | undefined;
+    await this.queueRecordMutation(agentId, (existing) => {
+      if (!existing) {
+        throw new Error(`Agent ${agentId} not found`);
+      }
+      if (existing.retirement && existing.retirement.operationId !== retirement.operationId) {
+        throw new AgentRetirementConflictError(
+          agentId,
+          existing.retirement.operationId,
+          retirement.operationId,
+        );
+      }
+      const record: StoredAgentRecord = {
+        ...existing,
+        retirement: existing.retirement ?? retirement,
+        retiredHistory: existing.retirement ? existing.retiredHistory : history,
+        updatedAt: existing.retirement ? existing.updatedAt : retirement.retiredAt,
+      };
+      result = record;
+      return record;
+    });
+    if (!result) {
+      throw new Error(`Agent ${agentId} not found`);
+    }
+    return result;
   }
 
   async setTitle(agentId: string, title: string): Promise<void> {

@@ -102,6 +102,7 @@ Each agent is stored as a separate JSON file, grouped by project directory.
 | `attentionReason`    | `"finished" \| "error" \| "permission"?` | Why attention is needed                                                                                                                                                                                                                                                                                                                                                             |
 | `attentionTimestamp` | `string?` (ISO 8601)                     | When attention was flagged                                                                                                                                                                                                                                                                                                                                                          |
 | `internal`           | `boolean?`                               | Whether this is a system-internal agent                                                                                                                                                                                                                                                                                                                                             |
+| `retirement`         | `{ operationId, reason, retiredAt }?`    | Durable, immutable exclusion fence set by `agent.retire.request`; separate from `archivedAt`, not reversible. See [agent-lifecycle.md](./agent-lifecycle.md#durable-retirement).                                                                                                                                                                                                    |
 | `archivedAt`         | `string?` (ISO 8601)                     | Soft-delete timestamp                                                                                                                                                                                                                                                                                                                                                               |
 
 ### Nested: SerializableConfig
@@ -625,3 +626,7 @@ Stores binary attachment blobs keyed by attachment ID.
 | `createdAt`   | `number`  | Epoch ms                       |
 | `fileName`    | `string?` | Original filename              |
 | `byteSize`    | `number?` | Size in bytes                  |
+
+### Retired conversation snapshot
+
+`retiredHistory` is an optional frozen snapshot on the agent record containing projected rows, epoch, sequence window and capture time. Retirement persists it in the same atomic JSON write as the immutable fence and preserves it through later metadata writes. Record size therefore grows with the captured conversation. No provider is resumed to serve this history. This uses the existing write-and-rename durability contract; power-loss durability is not claimed.

@@ -17,6 +17,12 @@ export interface LifecycleAgentManager {
   clearAgentAttention(agentId: string): Promise<void>;
   archiveAgent(agentId: string): Promise<{ archivedAt: string }>;
   archiveSnapshot(agentId: string, archivedAt: string): Promise<StoredAgentRecord>;
+  retireAgent(
+    agentId: string,
+    options: { reason: string; operationId: string },
+  ): Promise<{
+    retiredAt: string;
+  }>;
   closeAgent(agentId: string): Promise<void>;
   setLabels(agentId: string, labels: Record<string, string>): Promise<void>;
   detachAgent(agentId: string): Promise<{
@@ -142,6 +148,33 @@ export async function archiveAgentCommand(
     archivedAt: record.archivedAt,
     record,
   };
+}
+
+export interface RetireAgentResult {
+  agentId: string;
+  retiredAt: string;
+  record: StoredAgentRecord;
+}
+
+/**
+ * No force bypass and no cancel-then-retire fallback: an active foreground
+ * turn, unresolved permission, or running provider child fails this outright
+ * so the caller can decide what to do, rather than the daemon silently
+ * abandoning in-flight work.
+ */
+export async function retireAgentCommand(
+  dependencies: Pick<AgentLifecycleCommandDependencies, "agentManager" | "agentStorage">,
+  input: { agentId: string; reason: string; operationId: string },
+): Promise<RetireAgentResult> {
+  const { retiredAt } = await dependencies.agentManager.retireAgent(input.agentId, {
+    reason: input.reason,
+    operationId: input.operationId,
+  });
+  const record = await dependencies.agentStorage.get(input.agentId);
+  if (!record) {
+    throw new Error(`Agent not found in storage after retirement: ${input.agentId}`);
+  }
+  return { agentId: input.agentId, retiredAt, record };
 }
 
 export async function closeAgentCommand(

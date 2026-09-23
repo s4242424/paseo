@@ -137,6 +137,30 @@ Provider session connection owns every process it spawns until the session is re
 `connect()` must dispose that process before rethrowing; the manager cannot clean up a session it never
 received.
 
+## Durable retirement
+
+Retirement (`agent.retire.request`, `AgentManager.retireAgent`) is a separate, one-way exclusion
+fence, not a stronger archive. Archive is reversible; retirement is not, and has no unretire
+request. The fence is a `retirement` field on the stored agent record
+(`packages/server/src/server/agent/agent-retirement.ts`), independent of `archivedAt` and mutable
+labels, and survives every later `upsert`/`applySnapshot`, including a stale in-flight snapshot.
+
+Admission has no force bypass: retirement is refused outright while the agent has an active
+foreground turn, an unresolved or in-flight permission response, or any known provider-managed
+children (including terminal descriptors), because none of those can be safely abandoned mid-flight. The fence is persisted before
+the runtime closes, so a persistence failure leaves the agent running normally, and a close failure
+after a successful persist leaves the fence in place for a retry to finish cleanup. Retries reuse
+the same `operationId`; a different `operationId` against an already-retired agent is refused.
+
+Every interactive provider entry that can resume or create a runtime — `ensureAgentLoaded` (used by
+resume, prompt dispatch, and reload) and native unarchive — reads the stored fence first and refuses
+before any provider work starts. This covers live agents, stored-only agents, restarts, and
+concurrent requests, because they all route through the same storage read. Read-only history fetches
+do not call `ensureAgentLoaded` and stay available for a retired agent. The host captures projected timeline rows, their epoch and sequence window atomically with the fence. Timeline fetch, search, prompt indexing and fork-context reads use this frozen snapshot without opening a provider session. A first retirement requires loaded conversation history; a cold record is refused rather than silently retiring with empty history. Idempotent retries retain the original snapshot, including after restart.
+
+This primitive intentionally does not implement rotation policy: it does not choose a successor,
+does not run any coordinator, and cascades to nothing. That decision belongs above core.
+
 ## Tabs vs archive
 
 These are two distinct concepts that used to be conflated:
@@ -243,12 +267,13 @@ $PASEO_HOME/agents/{cwd-with-dashes}/{agent-id}.json
 
 Each agent is a single JSON file. Fields relevant to this doc:
 
-| Field                                        | Type          | Meaning                                                                            |
-| -------------------------------------------- | ------------- | ---------------------------------------------------------------------------------- |
-| `id`                                         | `string`      | Stable identifier                                                                  |
-| `archivedAt`                                 | `string?`     | Soft-delete timestamp (ISO 8601)                                                   |
-| `labels["paseo.parent-agent-id"]`            | `string?`     | Parent agent ID, set automatically for agent-scoped creation and removed by detach |
-| `labels["paseo.open-agent-tab.<client-id>"]` | `string?`     | `"true"` protects an open tab on that client; detach clears every matching label   |
-| `lastStatus`                                 | `AgentStatus` | `initializing` / `idle` / `running` / `error` / `closed`                           |
+| Field                                        | Type          | Meaning                                                                                      |
+| -------------------------------------------- | ------------- | -------------------------------------------------------------------------------------------- |
+| `id`                                         | `string`      | Stable identifier                                                                            |
+| `archivedAt`                                 | `string?`     | Soft-delete timestamp (ISO 8601)                                                             |
+| `labels["paseo.parent-agent-id"]`            | `string?`     | Parent agent ID, set automatically for agent-scoped creation and removed by detach           |
+| `labels["paseo.open-agent-tab.<client-id>"]` | `string?`     | `"true"` protects an open tab on that client; detach clears every matching label             |
+| `lastStatus`                                 | `AgentStatus` | `initializing` / `idle` / `running` / `error` / `closed`                                     |
+| `retirement`                                 | `object?`     | Durable exclusion fence (`operationId`, `reason`, `retiredAt`); see Durable retirement above |
 
 See [`docs/data-model.md`](./data-model.md) for the full agent record.

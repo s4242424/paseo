@@ -16,6 +16,7 @@ import type {
   AgentSessionConfig,
 } from "./agent-sdk-types.js";
 import { createTestAgentClients } from "../test-utils/fake-agent-client.js";
+import { AgentRetiredError } from "./agent-retirement.js";
 
 test("loads archived records for history and active records with the interactive default", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-loading-purpose-"));
@@ -75,6 +76,105 @@ test("loads archived records for history and active records with the interactive
       manager.closeAgent(archivedId).catch(() => undefined),
       manager.closeAgent(activeId).catch(() => undefined),
     ]);
+    await manager.flush().catch(() => undefined);
+    await storage.flush().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a retired agent refuses to resume, both live and after restart", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-loading-retired-"));
+  const logger = createTestLogger();
+  const storage = new AgentStorage(path.join(root, "agents"), logger);
+  const manager = new AgentManager({
+    clients: createTestAgentClients(),
+    registry: storage,
+    logger,
+  });
+
+  const agentId = "00000000-0000-4000-8000-000000000501";
+
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: root }, agentId, {
+      workspaceId: "workspace-retire",
+    });
+    await manager.closeAgent(agent.id);
+
+    await manager.retireAgent(agentId, { reason: "isolation test", operationId: "op-1" });
+
+    await expect(
+      ensureAgentLoaded(agentId, { agentManager: manager, agentStorage: storage, logger }),
+    ).rejects.toThrow(AgentRetiredError);
+
+    // A second manager over the same storage simulates a daemon restart: no
+    // live agent, so this must load storage, see the fence, and still refuse.
+    const restarted = new AgentManager({
+      clients: createTestAgentClients(),
+      registry: storage,
+      logger,
+    });
+    await expect(
+      ensureAgentLoaded(agentId, { agentManager: restarted, agentStorage: storage, logger }),
+    ).rejects.toThrow(AgentRetiredError);
+    expect(restarted.getAgent(agentId)).toBeNull();
+  } finally {
+    await manager.closeAgent(agentId).catch(() => undefined);
+    await manager.flush().catch(() => undefined);
+    await storage.flush().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a retired agent never resumes a provider for history or interactive loading", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-loading-history-only-"));
+  const logger = createTestLogger();
+  const storage = new AgentStorage(path.join(root, "agents"), logger);
+  const baseClient = createTestAgentClients().codex;
+  if (!baseClient) {
+    throw new Error("expected Codex test client");
+  }
+
+  const resumeOptions: Array<AgentResumeSessionOptions | undefined> = [];
+  const client: AgentClient = {
+    provider: baseClient.provider,
+    capabilities: baseClient.capabilities,
+    createSession: async (
+      config: AgentSessionConfig,
+      launchContext?: AgentLaunchContext,
+    ): Promise<AgentSession> => await baseClient.createSession(config, launchContext),
+    resumeSession: async (
+      handle: AgentPersistenceHandle,
+      overrides?: Partial<AgentSessionConfig>,
+      launchContext?: AgentLaunchContext,
+      options?: AgentResumeSessionOptions,
+    ): Promise<AgentSession> => {
+      resumeOptions.push(options);
+      return await baseClient.resumeSession(handle, overrides, launchContext);
+    },
+    fetchCatalog: async (options) => await baseClient.fetchCatalog(options),
+    isAvailable: async () => await baseClient.isAvailable(),
+  };
+  const manager = new AgentManager({
+    clients: { codex: client },
+    registry: storage,
+    logger,
+  });
+
+  const agentId = "00000000-0000-4000-8000-000000000503";
+
+  try {
+    await manager.createAgent({ provider: "codex", cwd: root }, agentId, {
+      workspaceId: "workspace-history-only",
+    });
+    await manager.retireAgent(agentId, { reason: "history test", operationId: "op-1" });
+    await manager.fetchRetiredAgentTimeline(agentId);
+    expect(resumeOptions).toEqual([]);
+    await expect(
+      ensureAgentLoaded(agentId, { agentManager: manager, agentStorage: storage, logger }),
+    ).rejects.toThrow(AgentRetiredError);
+    expect(resumeOptions).toEqual([]);
+  } finally {
+    await manager.closeAgent(agentId).catch(() => undefined);
     await manager.flush().catch(() => undefined);
     await storage.flush().catch(() => undefined);
     await rm(root, { recursive: true, force: true });

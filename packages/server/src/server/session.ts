@@ -52,6 +52,7 @@ import {
   toAgentPersistenceHandle,
 } from "./persistence-hooks.js";
 import { ensureAgentLoaded, ensureUnarchivedAgentLoaded } from "./agent/agent-loading.js";
+import { AgentRetiredError } from "./agent/agent-retirement.js";
 import {
   sendPromptToAgent,
   waitForAgentRunStartWithTimeout,
@@ -101,6 +102,7 @@ import type {
   AgentManagerEvent,
   AgentTimelineCursor,
   AgentTimelineFetchDirection,
+  AgentTimelineFetchOptions,
   AgentTimelineFetchResult,
   ManagedAgent,
 } from "./agent/agent-manager.js";
@@ -111,6 +113,7 @@ import {
   cancelAgentRunCommand,
   closeAgentCommand,
   detachAgentCommand,
+  retireAgentCommand,
   setAgentModeCommand,
   updateAgentCommand,
 } from "./agent/lifecycle-command.js";
@@ -2599,6 +2602,13 @@ export class Session {
     switch (msg.type) {
       case "agent.detach.request":
         return this.handleDetachAgentRequest(msg.agentId, msg.requestId);
+      case "agent.retire.request":
+        return this.handleRetireAgentRequest(
+          msg.agentId,
+          msg.reason,
+          msg.operationId,
+          msg.requestId,
+        );
       default:
         return undefined;
     }
@@ -3266,6 +3276,53 @@ export class Session {
           agentId,
           accepted: false,
           error: message,
+        },
+      });
+    }
+  }
+
+  private async handleRetireAgentRequest(
+    agentId: string,
+    reason: string,
+    operationId: string,
+    requestId: string,
+  ): Promise<void> {
+    this.sessionLogger.info({ agentId, requestId, operationId }, "Retiring agent");
+
+    try {
+      const result = await retireAgentCommand(
+        { agentManager: this.agentManager, agentStorage: this.agentStorage },
+        { agentId, reason, operationId },
+      );
+
+      if (this.agentUpdates.hasSubscription()) {
+        const payload = await this.agentUpdates.emitStoredRecord(result.record);
+        if (payload.workspaceId) {
+          await this.emitWorkspaceUpdateForWorkspaceId(payload.workspaceId);
+        }
+      }
+
+      this.emit({
+        type: "agent.retire.response",
+        payload: {
+          requestId,
+          agentId,
+          accepted: true,
+          error: null,
+          retiredAt: result.retiredAt,
+        },
+      });
+    } catch (error) {
+      const message = getErrorMessageOr(error, "Failed to retire agent");
+      this.sessionLogger.error({ err: error, agentId, requestId }, "Failed to retire agent");
+      this.emit({
+        type: "agent.retire.response",
+        payload: {
+          requestId,
+          agentId,
+          accepted: false,
+          error: message,
+          retiredAt: null,
         },
       });
     }
@@ -4396,6 +4453,16 @@ export class Session {
     );
     try {
       const matched = await this.unarchiveAgentByHandle(handle);
+      if (matched?.record.retirement) {
+        // Explicit interactive intent: this RPC must be refused outright, not
+        // silently satisfied by the read-only "history" purpose
+        // resumeAgentFromPersistence would otherwise fall back to for a
+        // retired-but-unarchived record (matched.record.archivedAt is false
+        // here whenever didUnarchive stayed false, i.e. it was never
+        // archived to begin with). Reporting "agent_resumed" for a session
+        // that never truly resumed would be a false success.
+        throw new AgentRetiredError(matched.record.id);
+      }
       const effectiveOverrides = matched
         ? { ...buildConfigOverrides(matched.record), ...overrides }
         : overrides;
@@ -7587,6 +7654,29 @@ export class Session {
     });
   }
 
+  private async getAgentHistoryView(agentId: string) {
+    const record = await this.agentStorage.get(agentId);
+    if (record?.retirement) {
+      return {
+        agent: this.buildStoredAgentPayload(record),
+        fetch: (options?: AgentTimelineFetchOptions) =>
+          this.agentManager.fetchRetiredAgentTimeline(agentId, options),
+        rows: () => this.agentManager.getRetiredAgentTimelineRows(agentId),
+      };
+    }
+    const snapshot = await ensureAgentLoaded(agentId, {
+      agentManager: this.agentManager,
+      agentStorage: this.agentStorage,
+      logger: this.sessionLogger,
+    });
+    return {
+      agent: await this.buildAgentPayload(snapshot),
+      fetch: async (options?: AgentTimelineFetchOptions) =>
+        this.agentManager.fetchTimeline(agentId, options),
+      rows: () => this.agentManager.getTimelineRows(agentId),
+    };
+  }
+
   private async handleFetchAgentTimelineRequest(
     msg: Extract<SessionInboundMessage, { type: "fetch_agent_timeline_request" }>,
     source?: object,
@@ -7603,14 +7693,10 @@ export class Session {
       : undefined;
 
     try {
-      const snapshot = await ensureAgentLoaded(msg.agentId, {
-        agentManager: this.agentManager,
-        agentStorage: this.agentStorage,
-        logger: this.sessionLogger,
-      });
-      const agentPayload = await this.buildAgentPayload(snapshot);
+      const history = await this.getAgentHistoryView(msg.agentId);
+      const agentPayload = history.agent;
 
-      const fetchedControlTimeline = this.agentManager.fetchTimeline(msg.agentId, {
+      const fetchedControlTimeline = await history.fetch({
         direction,
         cursor,
         limit: pageLimit,
@@ -7656,7 +7742,7 @@ export class Session {
             ...(msg.mergeWindow === true ? { mergeWindow: true } : {}),
             entries: entries.map((entry) => {
               const payloadEntry = {
-                provider: snapshot.provider,
+                provider: agentPayload.provider,
                 item: entry.item,
                 timestamp: entry.timestamp,
                 seqStart: entry.seqStart,
@@ -7733,21 +7819,14 @@ export class Session {
     source?: object,
   ): Promise<void> {
     try {
-      await ensureAgentLoaded(msg.agentId, {
-        agentManager: this.agentManager,
-        agentStorage: this.agentStorage,
-        logger: this.sessionLogger,
-      });
-      const rows = await this.agentManager.getTimelineRows(msg.agentId);
-      const { epoch } = this.agentManager.fetchTimeline(msg.agentId, {
+      const history = await this.getAgentHistoryView(msg.agentId);
+      const rows = await history.rows();
+      const { epoch } = await history.fetch({
         direction: "tail",
         limit: 1,
       });
       const result = await searchTimeline({ rows, query: msg.query, cursor: msg.cursor });
-      if (
-        this.agentManager.fetchTimeline(msg.agentId, { direction: "tail", limit: 1 }).epoch !==
-        epoch
-      ) {
+      if ((await history.fetch({ direction: "tail", limit: 1 })).epoch !== epoch) {
         throw new Error("History changed; search again");
       }
       this.emitForSource(
@@ -7786,13 +7865,9 @@ export class Session {
     source?: object,
   ): Promise<void> {
     try {
-      await ensureAgentLoaded(msg.agentId, {
-        agentManager: this.agentManager,
-        agentStorage: this.agentStorage,
-        logger: this.sessionLogger,
-      });
-      const rows = await this.agentManager.getTimelineRows(msg.agentId);
-      const timeline = this.agentManager.fetchTimeline(msg.agentId, {
+      const history = await this.getAgentHistoryView(msg.agentId);
+      const rows = await history.rows();
+      const timeline = await history.fetch({
         direction: "tail",
         limit: 1,
       });
@@ -7965,13 +8040,9 @@ export class Session {
     msg: Extract<SessionInboundMessage, { type: "agent.fork_context.request" }>,
   ): Promise<void> {
     try {
-      const snapshot = await ensureAgentLoaded(msg.agentId, {
-        agentManager: this.agentManager,
-        agentStorage: this.agentStorage,
-        logger: this.sessionLogger,
-      });
-      const agentPayload = await this.buildAgentPayload(snapshot);
-      const timeline = this.agentManager.fetchTimeline(msg.agentId, {
+      const history = await this.getAgentHistoryView(msg.agentId);
+      const agentPayload = history.agent;
+      const timeline = await history.fetch({
         direction: "tail",
         limit: 0,
       });
@@ -7982,7 +8053,7 @@ export class Session {
           : null,
         boundaryMessageId: msg.boundaryMessageId,
         agentTitle: agentPayload.title,
-        cwd: snapshot.cwd,
+        cwd: agentPayload.cwd,
       });
 
       this.emit({

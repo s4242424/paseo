@@ -95,38 +95,14 @@ export class InMemoryAgentTimelineStore {
 
   fetch(agentId: string, options?: AgentTimelineFetchOptions): AgentTimelineFetchResult {
     const state = this.requireState(agentId);
-    const direction = options?.direction ?? "tail";
-    const cursor = options?.cursor;
-    const rows = state.projection.getRows();
-    const window = { minSeq: state.minSeq, maxSeq: state.nextSeq - 1, nextSeq: state.nextSeq };
-    const staleCursor = cursor !== undefined && cursor.epoch !== state.epoch;
-    const gap =
-      !staleCursor &&
-      direction === "after" &&
-      cursor !== undefined &&
-      rows.length > 0 &&
-      cursor.seq < state.minSeq - 1;
-    const reset = staleCursor || gap;
-    const page = selectProjectedTimelinePage({
-      rows,
-      bounds: window,
-      direction: reset ? "tail" : direction,
-      cursorSeq: cursor?.seq,
-      limit: options?.limit ?? DEFAULT_TIMELINE_FETCH_LIMIT,
-    });
-    return {
-      epoch: state.epoch,
-      direction,
-      reset,
-      staleCursor,
-      gap,
-      window,
-      hasOlder: page.hasOlder,
-      hasNewer: page.hasNewer,
-      startSeq: page.startSeq,
-      endSeq: page.endSeq,
-      rows: page.entries.map((entry) => Object.assign({ seq: entry.seqEnd }, entry)),
-    };
+    return fetchProjectedTimelineSnapshot(
+      {
+        epoch: state.epoch,
+        rows: state.projection.getRows(),
+        window: { minSeq: state.minSeq, maxSeq: state.nextSeq - 1, nextSeq: state.nextSeq },
+      },
+      options,
+    );
   }
 
   append(
@@ -184,4 +160,41 @@ export class InMemoryAgentTimelineStore {
       return row;
     });
   }
+}
+
+export function fetchProjectedTimelineSnapshot(
+  snapshot: Pick<AgentTimelineFetchResult, "epoch" | "rows" | "window">,
+  options?: AgentTimelineFetchOptions,
+): AgentTimelineFetchResult {
+  const direction = options?.direction ?? "tail";
+  const cursor = options?.cursor;
+  const { rows, window, epoch } = snapshot;
+  const staleCursor = cursor !== undefined && cursor.epoch !== epoch;
+  const gap =
+    !staleCursor &&
+    direction === "after" &&
+    cursor !== undefined &&
+    rows.length > 0 &&
+    cursor.seq < window.minSeq - 1;
+  const reset = staleCursor || gap;
+  const page = selectProjectedTimelinePage({
+    rows,
+    bounds: window,
+    direction: reset ? "tail" : direction,
+    cursorSeq: cursor?.seq,
+    limit: options?.limit ?? DEFAULT_TIMELINE_FETCH_LIMIT,
+  });
+  return {
+    epoch: epoch,
+    direction,
+    reset,
+    staleCursor,
+    gap,
+    window,
+    hasOlder: page.hasOlder,
+    hasNewer: page.hasNewer,
+    startSeq: page.startSeq,
+    endSeq: page.endSeq,
+    rows: page.entries.map((entry) => Object.assign({ seq: entry.seqEnd }, entry)),
+  };
 }

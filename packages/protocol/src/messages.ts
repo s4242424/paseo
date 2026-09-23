@@ -1984,6 +1984,29 @@ export const AgentDetachResponseMessageSchema = z.object({
   payload: AgentActionResponsePayloadSchema,
 });
 
+/**
+ * Durable retirement is a one-way host-owned exclusion fence, distinct from
+ * archive: it forbids any future interactive resume/prompt for the agent,
+ * even after the plugin that requested it is gone. There is no unretire
+ * request. `operationId` makes a repeated request idempotent (a retry after a
+ * failed close); a different `operationId` against an already-retired agent
+ * is refused.
+ */
+export const AgentRetireRequestMessageSchema = z.object({
+  type: z.literal("agent.retire.request"),
+  agentId: z.string(),
+  reason: z.string(),
+  operationId: z.string(),
+  requestId: z.string(),
+});
+
+export const AgentRetireResponseMessageSchema = z.object({
+  type: z.literal("agent.retire.response"),
+  payload: AgentActionResponsePayloadSchema.extend({
+    retiredAt: z.string().nullable(),
+  }),
+});
+
 export const AgentRewindModeSchema = z.enum(["conversation", "files", "both"]);
 
 export const AgentRewindRequestMessageSchema = z.object({
@@ -3252,6 +3275,7 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   SetAgentFeatureRequestMessageSchema,
   AgentConfigApplyRequestMessageSchema,
   AgentDetachRequestMessageSchema,
+  AgentRetireRequestMessageSchema,
   AgentRewindRequestMessageSchema,
   AgentPermissionResponseMessageSchema,
   CheckoutStatusRequestSchema,
@@ -3693,6 +3717,10 @@ export const ServerInfoStatusPayloadSchema = z
         agentProfiles: z.boolean().optional(),
         // COMPAT(agentConfigApply): added in v0.3.2, remove gate after 2027-02-11.
         agentConfigApply: z.boolean().optional(),
+        // Durable host-owned agent retirement (agent.retire.request); an older
+        // daemon has no exclusion fence, so the client must not fall back to
+        // archive as an equivalent.
+        agentDurableRetirement: z.boolean().optional(),
       })
       .optional(),
   })
@@ -6834,6 +6862,7 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   SetAgentFeatureResponseMessageSchema,
   AgentConfigApplyResponseMessageSchema,
   AgentDetachResponseMessageSchema,
+  AgentRetireResponseMessageSchema,
   AgentRewindResponseMessageSchema,
   UpdateAgentResponseMessageSchema,
   ProjectRenameResponseSchema,
@@ -7033,6 +7062,8 @@ export type SetAgentThinkingResponseMessage = z.infer<typeof SetAgentThinkingRes
 export type SetAgentFeatureResponseMessage = z.infer<typeof SetAgentFeatureResponseMessageSchema>;
 export type AgentConfigApplyResponseMessage = z.infer<typeof AgentConfigApplyResponseMessageSchema>;
 export type AgentDetachResponseMessage = z.infer<typeof AgentDetachResponseMessageSchema>;
+export type AgentRetireRequestMessage = z.infer<typeof AgentRetireRequestMessageSchema>;
+export type AgentRetireResponseMessage = z.infer<typeof AgentRetireResponseMessageSchema>;
 export type AgentRewindResponseMessage = z.infer<typeof AgentRewindResponseMessageSchema>;
 export type UpdateAgentResponseMessage = z.infer<typeof UpdateAgentResponseMessageSchema>;
 export type ProjectRenameResponse = z.infer<typeof ProjectRenameResponseSchema>;

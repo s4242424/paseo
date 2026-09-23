@@ -21,6 +21,7 @@ import { getOpenAgentTabLabel, PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/
 import { formatSystemNotificationPrompt, startAgentRun } from "./agent-prompt.js";
 import { StaleProviderSessionError } from "./stale-provider-session-error.js";
 import { ensureAgentLoaded, ensureUnarchivedAgentLoaded } from "./agent-loading.js";
+import { AgentRetiredError, AgentRetirementBusyError } from "./agent-retirement.js";
 import type { StoredAgentRecord } from "./agent-storage.js";
 import type {
   AgentTimelineFetchOptions,
@@ -11022,6 +11023,502 @@ test("concurrent native restores run once before resuming the same agent", async
   } finally {
     restoreAllowed.resolve();
     if (agentId) await manager.closeAgent(agentId);
+    await storage.flush();
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+class HangingTurnTestAgentSession extends TestAgentSession {
+  override async startTurn(): Promise<{ turnId: string }> {
+    const turnId = "hanging-turn";
+    setTimeout(() => {
+      this.pushEvent({ type: "turn_started", provider: this.provider, turnId });
+    }, 0);
+    return { turnId };
+  }
+}
+
+test("retireAgent rejects a busy agent without touching storage, then persists the fence and closes once idle", async () => {
+  let capturedSession: HangingTurnTestAgentSession | null = null;
+  class HangingTurnTestAgentClient extends TestAgentClient {
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      capturedSession = new HangingTurnTestAgentSession(config);
+      return capturedSession;
+    }
+  }
+
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-retire-busy-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const manager = new AgentManager({
+    clients: { codex: new HangingTurnTestAgentClient() },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000133",
+  });
+
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+
+    const run = manager.streamAgent(agent.id, "hang");
+    const drain = (async () => {
+      for await (const _event of run) {
+        // Drain until the hanging turn is completed below.
+      }
+    })();
+    await manager.waitForAgentRunStart(agent.id);
+
+    await expect(
+      manager.retireAgent(agent.id, { reason: "busy test", operationId: "op-1" }),
+    ).rejects.toThrow(AgentRetirementBusyError);
+    expect((await storage.get(agent.id))?.retirement).toBeUndefined();
+    expect(manager.getAgent(agent.id)).not.toBeNull();
+
+    capturedSession!.pushEvent({
+      type: "turn_completed",
+      provider: "codex",
+      turnId: "hanging-turn",
+    });
+    await drain;
+
+    const { retiredAt } = await manager.retireAgent(agent.id, {
+      reason: "busy test",
+      operationId: "op-2",
+    });
+    expect(retiredAt).toBeTruthy();
+    expect(manager.getAgent(agent.id)).toBeNull();
+
+    const stored = await storage.get(agent.id);
+    expect(stored?.retirement).toEqual({
+      operationId: "op-2",
+      reason: "busy test",
+      retiredAt,
+    });
+
+    // Idempotent retry with the same operation succeeds without a conflict.
+    await expect(
+      manager.retireAgent(agent.id, { reason: "busy test", operationId: "op-2" }),
+    ).resolves.toEqual({ retiredAt });
+
+    // A different operation against an already-retired agent is refused.
+    await expect(
+      manager.retireAgent(agent.id, { reason: "second op", operationId: "op-3" }),
+    ).rejects.toThrow(/already retired/);
+  } finally {
+    await storage.flush();
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("retireAgent rejects a tracked pending run before the returned iterator is ever drained", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-retire-lazy-iterator-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000134",
+  });
+
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+
+    // Calling streamAgent already registers a tracked pending run
+    // synchronously, before the caller ever calls .next() on the generator
+    // it returns. Retirement must see that tracked run and refuse, even
+    // though no turn has visibly "started" yet.
+    const run = manager.streamAgent(agent.id, "lazy");
+
+    await expect(
+      manager.retireAgent(agent.id, { reason: "lazy iterator test", operationId: "op-1" }),
+    ).rejects.toThrow(AgentRetirementBusyError);
+    expect((await storage.get(agent.id))?.retirement).toBeUndefined();
+
+    // Drain for cleanup; the default TestAgentSession completes the turn on
+    // its own via startTurn's setTimeout.
+    for await (const _event of run) {
+      // Drain to let the tracked run settle before manager teardown.
+    }
+  } finally {
+    await storage.flush();
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("retireAgent rejects an agent with a pending permission", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-retire-permission-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000135",
+  });
+
+  try {
+    const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    const agent = manager.getAgent(snapshot.id);
+    if (!agent) throw new Error("Expected managed agent");
+    agent.pendingPermissions.set("perm-1", {
+      id: "perm-1",
+      provider: "codex",
+      name: "TestPermission",
+      kind: "plan",
+      input: { plan: "test" },
+    });
+
+    await expect(
+      manager.retireAgent(agent.id, { reason: "permission test", operationId: "op-1" }),
+    ).rejects.toThrow(AgentRetirementBusyError);
+    expect((await storage.get(agent.id))?.retirement).toBeUndefined();
+  } finally {
+    await storage.flush();
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("retireAgent rejects an agent with a running provider-managed child", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-retire-child-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  let activeSession: TestAgentSession | null = null;
+  class ProviderChildClient extends TestAgentClient {
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      activeSession = new TestAgentSession(config);
+      return activeSession;
+    }
+  }
+  const manager = new AgentManager({
+    clients: { codex: new ProviderChildClient() },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000136",
+  });
+
+  try {
+    const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    activeSession?.pushEvent({
+      type: "provider_subagent",
+      provider: "codex",
+      event: { type: "upsert", id: "running-child", title: "Running child", status: "running" },
+    });
+    await vi.waitFor(() => expect(manager.listProviderSubagents(snapshot.id)).toHaveLength(1));
+
+    await expect(
+      manager.retireAgent(snapshot.id, { reason: "child test", operationId: "op-1" }),
+    ).rejects.toThrow(AgentRetirementBusyError);
+    expect((await storage.get(snapshot.id))?.retirement).toBeUndefined();
+  } finally {
+    await storage.flush();
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+class FlakyCloseTestAgentSession extends TestAgentSession {
+  shouldFailClose = true;
+
+  override async close(): Promise<void> {
+    if (this.shouldFailClose) {
+      throw new Error("simulated close failure");
+    }
+    await super.close();
+  }
+}
+
+test("a close failure after a persisted retirement still blocks a live prompt, ensureAgentLoaded, and direct resume, until a retry finishes cleanup", async () => {
+  let capturedSession: FlakyCloseTestAgentSession | null = null;
+  class FlakyCloseTestAgentClient extends TestAgentClient {
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      capturedSession = new FlakyCloseTestAgentSession(config);
+      return capturedSession;
+    }
+  }
+
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-retire-close-fail-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const manager = new AgentManager({
+    clients: { codex: new FlakyCloseTestAgentClient() },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000137",
+  });
+
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    const handle = manager.getAgent(agent.id)?.persistence;
+    if (!handle) throw new Error("Expected a persistence handle after createAgent");
+
+    await expect(
+      manager.retireAgent(agent.id, { reason: "close failure test", operationId: "op-1" }),
+    ).rejects.toThrow("simulated close failure");
+
+    // The fence is durable even though the runtime never actually closed.
+    expect((await storage.get(agent.id))?.retirement).toEqual({
+      operationId: "op-1",
+      reason: "close failure test",
+      retiredAt: expect.any(String),
+    });
+    expect(manager.isAgentRetired(agent.id)).toBe(true);
+    expect(manager.getAgent(agent.id)).not.toBeNull(); // still live: close failed
+
+    // A live prompt must not slip through just because the agent is still
+    // resident in memory.
+    expect(() => manager.streamAgent(agent.id, "should not run")).toThrow(AgentRetiredError);
+
+    // ensureAgentLoaded's "already live" fast path must not hand back this
+    // stale, fenced snapshot either.
+    await expect(
+      ensureAgentLoaded(agent.id, { agentManager: manager, agentStorage: storage, logger }),
+    ).rejects.toThrow(AgentRetiredError);
+
+    // A caller that bypasses ensureAgentLoaded and resumes by handle directly
+    // must also be refused, at the actual provider-write boundary.
+    await expect(
+      manager.resumeAgentFromPersistence(handle, { cwd: workdir }, agent.id),
+    ).rejects.toThrow(AgentRetiredError);
+
+    // Retry with the same operation: markRetired is idempotent, and this
+    // time the close succeeds, finishing cleanup.
+    if (capturedSession) capturedSession.shouldFailClose = false;
+    const retry = await manager.retireAgent(agent.id, {
+      reason: "close failure test",
+      operationId: "op-1",
+    });
+    expect(retry.retiredAt).toBeTruthy();
+    expect(manager.getAgent(agent.id)).toBeNull();
+  } finally {
+    await storage.flush();
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("retireAgent rejects an agent with a completed (non-running) provider-managed child", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-retire-child-terminal-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  let activeSession: TestAgentSession | null = null;
+  class ProviderChildClient extends TestAgentClient {
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      activeSession = new TestAgentSession(config);
+      return activeSession;
+    }
+  }
+  const manager = new AgentManager({
+    clients: { codex: new ProviderChildClient() },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000138",
+  });
+
+  try {
+    const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    // A terminal status is the store's best record of what happened, not a
+    // deterministic proof the underlying process fully exited (see
+    // agent-lifecycle.md's task-protocol gotchas: undeclared/backgrounded
+    // children and missed terminal events are real gaps). Retirement treats
+    // any known child conservatively, matching the old integrated admission.
+    activeSession?.pushEvent({
+      type: "provider_subagent",
+      provider: "codex",
+      event: { type: "upsert", id: "finished-child", title: "Finished child", status: "completed" },
+    });
+    await vi.waitFor(() => expect(manager.listProviderSubagents(snapshot.id)).toHaveLength(1));
+
+    await expect(
+      manager.retireAgent(snapshot.id, { reason: "terminal child test", operationId: "op-1" }),
+    ).rejects.toThrow(AgentRetirementBusyError);
+    expect((await storage.get(snapshot.id))?.retirement).toBeUndefined();
+  } finally {
+    await storage.flush();
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("createAgent refuses to recreate a retired agent id, same-process and after restart, without ever calling the provider", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-retire-create-reuse-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const client = new TestAgentClient();
+  const manager = new AgentManager({
+    clients: { codex: client },
+    registry: storage,
+    logger,
+  });
+
+  const retiredId = "00000000-0000-4000-8000-000000000139";
+
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, retiredId, {
+      workspaceId: undefined,
+    });
+    expect(client.createdConfigs).toHaveLength(1);
+    await manager.closeAgent(agent.id);
+    const { retiredAt } = await manager.retireAgent(agent.id, {
+      reason: "identity reuse test",
+      operationId: "op-1",
+    });
+
+    // Same process: recreating the exact id must be refused before any
+    // provider call, and the persisted fence must be untouched.
+    await expect(
+      manager.createAgent({ provider: "codex", cwd: workdir }, retiredId, {
+        workspaceId: undefined,
+      }),
+    ).rejects.toThrow(AgentRetiredError);
+    expect(client.createdConfigs).toHaveLength(1);
+    const storedAfterSameProcessAttempt = await storage.get(retiredId);
+    expect(storedAfterSameProcessAttempt?.retirement).toEqual({
+      operationId: "op-1",
+      reason: "identity reuse test",
+      retiredAt,
+    });
+
+    // Restart: a fresh manager and a fresh client over the same storage must
+    // also refuse, reading the fence from disk since its own in-process
+    // cache starts empty, and must never reach the fresh client's
+    // createSession either.
+    const restartedClient = new TestAgentClient();
+    const restarted = new AgentManager({
+      clients: { codex: restartedClient },
+      registry: storage,
+      logger,
+    });
+    await expect(
+      restarted.createAgent({ provider: "codex", cwd: workdir }, retiredId, {
+        workspaceId: undefined,
+      }),
+    ).rejects.toThrow(AgentRetiredError);
+    expect(restartedClient.createdConfigs).toHaveLength(0);
+    expect(restarted.getAgent(retiredId)).toBeNull();
+    const storedAfterRestartAttempt = await storage.get(retiredId);
+    expect(storedAfterRestartAttempt?.retirement).toEqual({
+      operationId: "op-1",
+      reason: "identity reuse test",
+      retiredAt,
+    });
+  } finally {
+    await storage.flush();
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("retired conversation survives fresh disk storage and manager with stable pagination and zero provider calls", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "retired-history-disk-"));
+  const storagePath = join(workdir, "agents");
+  const storage = new AgentStorage(storagePath, logger);
+  const client = new TestAgentClient();
+  const manager = new AgentManager({ clients: { codex: client }, registry: storage, logger });
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    await manager.appendTimelineItem(agent.id, {
+      type: "user_message",
+      text: "PERSISTED_HISTORY_SENTINEL",
+    });
+    await manager.appendTimelineItem(agent.id, { type: "assistant_message", text: "Answer one" });
+    await manager.appendTimelineItem(agent.id, { type: "user_message", text: "Second prompt" });
+    const before = manager.fetchTimeline(agent.id, { limit: 0 });
+    expect(before.rows.length).toBeGreaterThan(1);
+    await manager.retireAgent(agent.id, { reason: "history", operationId: "history-op" });
+    await storage.flush();
+    const create = vi.spyOn(client, "createSession");
+    const resume = vi.spyOn(client, "resumeSession");
+    const restartedStorage = new AgentStorage(storagePath, logger);
+    const restarted = new AgentManager({
+      clients: { codex: client },
+      registry: restartedStorage,
+      logger,
+    });
+    const restored = await restarted.fetchRetiredAgentTimeline(agent.id, { limit: 0 });
+    expect(restored).toEqual(before);
+    const tail = await restarted.fetchRetiredAgentTimeline(agent.id, { limit: 1 });
+    const older = await restarted.fetchRetiredAgentTimeline(agent.id, {
+      direction: "before",
+      cursor: { epoch: tail.epoch, seq: tail.startSeq! },
+      limit: 0,
+    });
+    expect(older.staleCursor).toBe(false);
+    expect([...older.rows, ...tail.rows]).toEqual(before.rows);
+    expect(await restarted.getRetiredAgentTimelineRows(agent.id)).toEqual(before.rows);
+    await restarted.retireAgent(agent.id, { reason: "retry", operationId: "history-op" });
+    expect(await restarted.fetchRetiredAgentTimeline(agent.id, { limit: 0 })).toEqual(before);
+    expect(create).not.toHaveBeenCalled();
+    expect(resume).not.toHaveBeenCalled();
+  } finally {
+    await manager.flush();
+    await storage.flush();
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("failed retirement persistence leaves the live agent usable and unfenced", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "retirement-persistence-failure-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    registry: storage,
+    logger,
+  });
+  let agentId: string | undefined;
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    agentId = agent.id;
+    const persist = vi
+      .spyOn(storage, "markRetired")
+      .mockRejectedValueOnce(new Error("simulated storage failure"));
+    await expect(
+      manager.retireAgent(agent.id, { reason: "failure", operationId: "failure-op" }),
+    ).rejects.toThrow("simulated storage failure");
+    persist.mockRestore();
+    expect((await storage.get(agent.id))?.retirement).toBeUndefined();
+    expect(manager.isAgentRetired(agent.id)).toBe(false);
+    expect(manager.getAgent(agent.id)?.lifecycle).toBe("idle");
+    await manager.runAgent(agent.id, { text: "still usable after failed persistence" });
+    expect(manager.getAgent(agent.id)?.lifecycle).toBe("idle");
+  } finally {
+    if (agentId) await manager.closeAgent(agentId);
+    await storage.flush();
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("a cold agent cannot be retired with silently missing conversation history", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "retirement-cold-history-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const client = new TestAgentClient();
+  const manager = new AgentManager({ clients: { codex: client }, registry: storage, logger });
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    await manager.appendTimelineItem(agent.id, {
+      type: "user_message",
+      text: "history must not disappear",
+    });
+    await manager.closeAgent(agent.id);
+    const resumed = vi.spyOn(client, "resumeSession");
+    const restarted = new AgentManager({
+      clients: { codex: client },
+      registry: new AgentStorage(join(workdir, "agents"), logger),
+      logger,
+    });
+    await expect(
+      restarted.retireAgent(agent.id, { reason: "cold", operationId: "cold-op" }),
+    ).rejects.toThrow("conversation history is not loaded");
+    expect((await storage.get(agent.id))?.retirement).toBeUndefined();
+    expect(resumed).not.toHaveBeenCalled();
+  } finally {
     await storage.flush();
     rmSync(workdir, { recursive: true, force: true });
   }
